@@ -24,7 +24,7 @@ import matplotlib.ticker as mtick
 
 # from monotone_paths import project_monotone_lInftymin
 # from ablation import compute_square_intensity
-from ablation_paths import masked_interpolation, find_class_transition
+from ablation_paths import masked_interpolation, find_class_transition, resample_to_reso
 
 def mpplot_ablpath_score( model, x, baseline, abl_seqs, label_nr=None
                         , tgt_subplots=None, savename=None
@@ -84,7 +84,7 @@ def mp_show_image(sp, im):
 def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots=None, **kwargs):
     nCh, w, h = x.shape
     def apply_mask(y, mask):
-        return y * mask.reshape(1,w,h).repeat(nCh,1,1)
+        return y * resample_to_reso(mask.unsqueeze(0), (w,h)).repeat(nCh,1,1)
     transition_loc = find_class_transition(model, x, baseline, abl_seq, **kwargs)
     mask = abl_seq[transition_loc]
     x_masked = apply_mask(x, 1 - mask)

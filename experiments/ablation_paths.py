@@ -21,6 +21,7 @@ import numpy as np
 import torch
 from monotone_paths import project_monotone_lInftymin
 from ablation import compute_square_intensity
+from image_filtering import apply_filter
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -65,6 +66,18 @@ def repair_ablation_path(abl_seq):
     return reParamNormalise_ablation_speed(abl_seq)
 
 
+def resample_to_reso(v, tgt_shape):
+    if len(v.shape) < 4:
+        return resample_to_reso(v.unsqueeze(1), tgt_shape).squeeze(1)
+    elif v.shape[2:] == tgt_shape:
+        return v
+    else:
+        assert(len(tgt_shape)==2)
+        return torch.nn.functional.interpolate( v, size=tgt_shape
+                                              , mode='bilinear', align_corners=False )
+        
+
+
 def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=None
                               , pointwise_scalar_product=False, gradients_postproc=lambda gs: gs):
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
@@ -74,15 +87,13 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
     nSq, wMask, hMask = abl_seq.shape
     nCh, wX, hX = x.shape
 
-    ch_rpl_seq = abl_seq.reshape(nSq,1,wMask,hMask)
-    if needs_resampling:
-        ch_rpl_seq = torch.nn.functional.interpolate(ch_rpl_seq, size=x.shape[1:]
-                                                     , mode='bilinear', align_corners=False)
-    ch_rpl_seq = ch_rpl_seq.repeat(1,nCh,1,1)
+    ch_rpl_seq = resample_to_match(abl_seq.reshape(nSq,1,wMask,hMask), wX, hW
+                      ).repeat(1,nCh,1,1)
     xOpt = x.to(abl_seq.device)
     difference = baseline.to(abl_seq.device) - xOpt
     intg = 0
     gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
+
     for i in range(nSq):
         argument = (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
                    ).detach().unsqueeze(0)
@@ -104,10 +115,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
         else:
             abl_update[i] = optstep*direction
     if needs_resampling:
-        abl_seq += torch.nn.functional.interpolate(abl_update.unsqueeze(1)
-                                                   , size=(wMask,hMask)
-                                                   , mode='bilinear', align_corners=False
-                                                   ).squeeze(1)
+        abl_seq += resample_to_reso(abl_update, (wMask,hMask))
     else:
         abl_seq += abl_update
     return intg
@@ -141,13 +149,15 @@ def optimised_path( model, x, baselines, path_steps, optstep, iterations
     return pth
 
 def masked_interpolation(x, baseline, abl_seq):
+    needs_resampling = x.shape[1:] != abl_seq.shape[1:]
     if type(abl_seq) != torch.Tensor:
         abl_seq = torch.stack(list(abl_seq))
     xOpt = x.to(abl_seq.device)
-    nSq, w, h = abl_seq.shape
-    nCh = x.shape[0]
+    nSq, wMask, hMask = abl_seq.shape
+    nCh, wX, hX = x.shape
 
-    ch_rpl_seq = abl_seq.reshape(nSq,1,w,h).repeat(1,nCh,1,1)
+    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
+                      ).repeat(1,nCh,1,1)
 
     difference = baseline.to(abl_seq.device) - xOpt
     return [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
