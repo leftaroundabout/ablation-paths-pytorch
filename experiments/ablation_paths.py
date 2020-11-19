@@ -87,7 +87,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
     nSq, wMask, hMask = abl_seq.shape
     nCh, wX, hX = x.shape
 
-    ch_rpl_seq = resample_to_match(abl_seq.reshape(nSq,1,wMask,hMask), wX, hW
+    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
                       ).repeat(1,nCh,1,1)
     xOpt = x.to(abl_seq.device)
     difference = baseline.to(abl_seq.device) - xOpt
@@ -139,8 +139,12 @@ def optimised_path( model, x, baselines, path_steps, optstep, iterations
                           / (np.tanh(saturation))
                     + torch.ones_like(pth))/2
         def filterWith(σ):
+            if ablmask_resolution is not None:
+                wMask, hMask = ablmask_resolution
+                w, h = x.shape[1:]
+                scale_factor = np.sqrt(wMask*hMask/(w*h))
             nonlocal pth
-            pth = pth*(1-filter_eta) + apply_filter(pth, σ)*filter_eta
+            pth = pth*(1-filter_eta) + apply_filter(pth, σ*scale_factor)*filter_eta
         if type(filter_sigma) is type(lambda i: 0):
             filterWith(filter_sigma(i))
         elif filter_sigma>0:
