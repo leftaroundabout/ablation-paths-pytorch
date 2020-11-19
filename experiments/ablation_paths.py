@@ -140,3 +140,29 @@ def optimised_path( model, x, baselines, path_steps, optstep, iterations
         pth = repair_ablation_path(pth)
     return pth
 
+def masked_interpolation(x, baseline, abl_seq):
+    if type(abl_seq) != torch.Tensor:
+        abl_seq = torch.stack(list(abl_seq))
+    xOpt = x.to(abl_seq.device)
+    nSq, w, h = abl_seq.shape
+    nCh = x.shape[0]
+
+    ch_rpl_seq = abl_seq.reshape(nSq,1,w,h).repeat(1,nCh,1,1)
+
+    difference = baseline.to(abl_seq.device) - xOpt
+    return [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
+                   ).detach()
+                  for i in range(nSq) ]
+
+def find_class_transition(model, x, baseline, abl_seq, label_nr=None):
+    if label_nr is None:
+        label_nr = torch.argmax(model(x.unsqueeze(0)))
+
+    predictions = model(torch.stack(
+                               masked_interpolation(x,baseline,abl_seq)))
+    imax = len(abl_seq) - 1
+    while torch.argmax(predictions[imax])!=label_nr:
+        imax -= 1
+    return imax
+
+
