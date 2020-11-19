@@ -20,6 +20,7 @@
 import numpy as np
 import torch
 from monotone_paths import project_monotone_lInftymin
+from ablation import compute_square_intensity
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -63,4 +64,79 @@ def repair_ablation_path(abl_seq):
     torch.clamp(abl_seq, 0, 1, out=abl_seq)
     return reParamNormalise_ablation_speed(abl_seq)
 
+
+def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=None
+                              , pointwise_scalar_product=False, gradients_postproc=lambda gs: gs):
+    needs_resampling = x.shape[1:] != abl_seq.shape[1:]
+
+    if label_nr is None:
+        label_nr = torch.argmax(model(x.unsqueeze(0)))
+    nSq, wMask, hMask = abl_seq.shape
+    nCh, wX, hX = x.shape
+
+    ch_rpl_seq = abl_seq.reshape(nSq,1,wMask,hMask)
+    if needs_resampling:
+        ch_rpl_seq = torch.nn.functional.interpolate(ch_rpl_seq, size=x.shape[1:]
+                                                     , mode='bilinear', align_corners=False)
+    ch_rpl_seq = ch_rpl_seq.repeat(1,nCh,1,1)
+    xOpt = x.to(abl_seq.device)
+    difference = baseline.to(abl_seq.device) - xOpt
+    intg = 0
+    gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
+    for i in range(nSq):
+        argument = (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
+                   ).detach().unsqueeze(0)
+        argument.requires_grad = True
+        result = torch.softmax(model(argument)[0], 0)
+        gs[i] = torch.autograd.grad(result[label_nr], argument)[0].squeeze(0)
+        intg += float(result[label_nr])/abl_seq.shape[0]
+
+    gs = gradients_postproc(gs)
+
+    abl_update = torch.zeros(nSq, wX, hX).to(abl_seq.device)
+    for i in range(nSq):
+        direction = ( torch.sum(gs[i] * difference, 0)
+                       if pointwise_scalar_product
+                       else -torch.sqrt(compute_square_intensity(gs[i])) )
+        direction -= torch.sum(direction)/torch.sum(torch.ones_like(direction))
+        if optstep is None:
+            abl_update[i] = direction/(torch.max(direction) - torch.min(direction))
+        else:
+            abl_update[i] = optstep*direction
+    if needs_resampling:
+        abl_seq += torch.nn.functional.interpolate(abl_update.unsqueeze(1)
+                                                   , size=(wMask,hMask)
+                                                   , mode='bilinear', align_corners=False
+                                                   ).squeeze(1)
+    else:
+        abl_seq += abl_update
+    return intg
+
+
+def optimised_path( model, x, baselines, path_steps, optstep, iterations
+                  , saturation=0, filter_sigma=0, filter_eta=1
+                  , initpth=None, ablmask_resolution=None
+                  , **kwargs):
+    if ablmask_resolution is None:
+        ablmask_resolution = x.shape[1:]
+    pth = ( torch.stack([p*torch.ones(ablmask_resolution)
+                         for p in np.linspace(0,1,path_steps)[1:-1]])
+                   .to(x.device)
+             if initpth is None else initpth )
+
+    for i in range(iterations):
+        print(gradientMove_ablation_path( model, x, baselines(), abl_seq=pth, optstep=optstep, **kwargs ))
+        if saturation>0:
+            pth = (torch.tanh( (pth*2 - torch.ones_like(pth))*saturation )
+                          / (np.tanh(saturation))
+                    + torch.ones_like(pth))/2
+        def filterWith(σ):
+            nonlocal pth
+            pth = pth*(1-filter_eta) + apply_filter(pth, σ)*filter_eta
+        if type(filter_sigma) is type(lambda i: 0):
+            filterWith(filter_sigma(i))
+        elif filter_sigma>0:
+            filterWith(filter_sigma)
+        pth = repair_ablation_path(pth)
+    return pth
 
