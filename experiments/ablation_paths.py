@@ -175,7 +175,7 @@ def find_class_transition(model, x, baseline, abl_seq, label_nr=None):
     predictions = model(torch.stack(
                                masked_interpolation(x,baseline,abl_seq)))
     imax = len(abl_seq) - 1
-    while torch.argmax(predictions[imax])!=label_nr:
+    while imax>0 and torch.argmax(predictions[imax])!=label_nr:
         imax -= 1
     return imax
 
