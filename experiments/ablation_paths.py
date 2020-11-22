@@ -168,15 +168,26 @@ def masked_interpolation(x, baseline, abl_seq):
                    ).detach()
                   for i in range(nSq) ]
 
-def find_class_transition(model, x, baseline, abl_seq, label_nr=None):
+def find_class_transition( model, x, baseline, abl_seq
+                         , minimum_ablation_pos=0.25, label_nr=None ):
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
 
     predictions = model(torch.stack(
                                masked_interpolation(x,baseline,abl_seq)))
     imax = len(abl_seq) - 1
-    while imax>0 and torch.argmax(predictions[imax])!=label_nr:
+    min_allowed_i = 1 # int(len(abl_seq) * minimum_ablation_pos)
+    while imax>=min_allowed_i and torch.argmax(predictions[imax])!=label_nr:
         imax -= 1
+    if imax < min_allowed_i:
+        best_score = 0
+        imax = min_allowed_i
+        for i in range(min_allowed_i, len(abl_seq)):
+            score = torch.softmax(predictions[i], 0)[label_nr]
+            if score > best_score:
+                score = best_score
+                imax = i
+    print("imax = %i" % imax)
     return imax
 
 
