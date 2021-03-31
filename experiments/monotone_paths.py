@@ -25,7 +25,7 @@
 import numba as nb
 import numpy as np
 
-@nb.jitclass([
+@nb.experimental.jitclass([
     ('xMin', nb.int64)
   , ('xMax', nb.int64)
   , ('yMin', nb.float64)
