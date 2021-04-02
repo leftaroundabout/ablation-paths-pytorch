@@ -26,10 +26,15 @@ import matplotlib.ticker as mtick
 # from ablation import compute_square_intensity
 from ablation_paths import masked_interpolation, find_class_transition, resample_to_reso
 
-def mpplot_ablpath_score( model, x, baseline, abl_seqs, label_nr=None
+def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , tgt_subplots=None, savename=None
                         , extras={}
                         , pretty_method_names={} ):
+    if callable(baselines):
+        baseline_samples = [ baselines()
+                              for i in range(12) ]
+    else:
+        baselines_samples = [baselines]
     abl_series = abl_seqs.items()
     fig, axs = ( plt.subplots(len(abl_series))
                ) if tgt_subplots is None else (None, tgt_subplots)
@@ -38,28 +43,41 @@ def mpplot_ablpath_score( model, x, baseline, abl_seqs, label_nr=None
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
 
-    all_predictions = {method: torch.softmax(model(torch.stack(
+    all_predictions = {
+         method: [ torch.softmax(model(torch.stack(
                                masked_interpolation(x, baseline, abl_seq))
                           ), dim=1).detach()[:,label_nr]
-                       for method, abl_seq in abl_series }
+                    for baseline in baseline_samples ]
+            for method, abl_seq in abl_series }
 
-    def as_domain(method):
-        n_spl = all_predictions[method].shape[0]
+    def as_domain(method, sampleid):
+        n_spl = all_predictions[method][sampleid].shape[0]
         return np.linspace(1/(n_spl+1), 1-1/(n_spl+1), n_spl)
     
+    predictions_stats = {
+        method:
+         { fdescr: np.array([f([float(pred[j]) for pred in predictions])
+                           for j in range(0, predictions[0].shape[0])])
+            for fdescr, f in [('median', np.median), ('min', np.min), ('max', np.max)]
+         }
+         for method, predictions in all_predictions.items() }
+
     for i, (method, abl_seq) in enumerate(abl_series):
         predictions = all_predictions[method]
         sf = axs[i] if len(abl_series)>1 else axs
-        sf.fill_between(as_domain(method), predictions.cpu().numpy()
-                       , alpha=0.25)
+        for stat_d in ['median', 'min', 'max']:
+            sf.fill_between( as_domain(method,0)
+                           , predictions_stats[method][stat_d]
+                           , alpha=0.1
+                           , color = (0,0.3,0.5,1) )
         for method_c, _ in abl_series:
-            sf.plot( as_domain(method_c)
-                   , all_predictions[method_c].cpu().numpy()
+            sf.plot( as_domain(method_c,0)
+                   , predictions_stats[method_c]['median']
                    , color= (0,0.3,0.5,1) if method_c==method
                             else (0.5,0.5,0,0.5) )
         if method in extras:
             extras[method](sf)
-        sf.text(0.1, 0.1, "score %.3g" % torch.mean(predictions))
+        sf.text(0.1, 0.1, "score %.3g" % torch.mean(torch.stack(predictions)))
         sf.set_title(pretty_method_names[method] if method in pretty_method_names
                        else method)
         sf.xaxis.set_major_formatter(mtick.FuncFormatter(
