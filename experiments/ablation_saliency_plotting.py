@@ -99,11 +99,14 @@ def mp_show_image(sp, im):
     sp.imshow(retrv(im.transpose(0,2) + 1)/2)
 
 
-def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots=None, **kwargs):
+def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots=None
+                                      , manual_loc_select=None, **kwargs):
     nCh, w, h = x.shape
     def apply_mask(y, mask):
         return y * resample_to_reso(mask.unsqueeze(0), (w,h)).repeat(nCh,1,1)
-    transition_loc = find_class_transition(model, x, baseline, abl_seq, **kwargs)
+    transition_loc = find_class_transition(model, x, baseline, abl_seq, **kwargs
+        ) if manual_loc_select is None else (
+         int(manual_loc_select * abl_seq.shape[0]) )
     mask = abl_seq[transition_loc]
     x_masked = apply_mask(x, 1 - mask)
     bl_masked = apply_mask(baseline, mask)
