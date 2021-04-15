@@ -91,7 +91,10 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
                       ).repeat(1,nCh,1,1)
     xOpt = x.to(abl_seq.device)
     difference = baseline.to(abl_seq.device) - xOpt
+    
+    # The path score, which is to be computed as an integral.
     intg = 0
+
     gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
 
     for i in range(nSq):
@@ -121,7 +124,8 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
     return intg
 
 
-def optimised_path( model, x, baselines, path_steps, optstep, iterations
+def optimised_path( model, x, baselines, path_steps, optstep
+                  , iterations, abort_criterion=(lambda scr: False)
                   , saturation=0, filter_sigma=0, filter_eta=1
                   , initpth=None, ablmask_resolution=None
                   , **kwargs):
@@ -133,7 +137,11 @@ def optimised_path( model, x, baselines, path_steps, optstep, iterations
              if initpth is None else initpth )
 
     for i in range(iterations):
-        print(gradientMove_ablation_path( model, x, baselines(), abl_seq=pth, optstep=optstep, **kwargs ))
+        current_score = gradientMove_ablation_path(
+            model, x, baselines(), abl_seq=pth, optstep=optstep, **kwargs )
+        print(current_score)
+        if abort_criterion(current_score):
+            return pth
         if saturation>0:
             pth = (torch.tanh( (pth*2 - torch.ones_like(pth))*saturation )
                           / (np.tanh(saturation))
