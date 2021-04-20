@@ -22,6 +22,7 @@ import torch
 from monotone_paths import project_monotone_lInftymin
 from ablation import compute_square_intensity
 from image_filtering import apply_filter
+from itertools import count
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -124,11 +125,11 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
     return intg
 
 
-def optimised_path( model, x, baselines, path_steps, optstep
-                  , iterations, abort_criterion=(lambda scr: False)
-                  , saturation=0, filter_sigma=0, filter_eta=1
-                  , initpth=None, ablmask_resolution=None
-                  , **kwargs):
+def path_optimisation_sequence (
+          model, x, baselines, path_steps, optstep
+        , saturation=0, filter_sigma=0, filter_eta=1
+        , initpth=None, ablmask_resolution=None
+        , **kwargs):
     if ablmask_resolution is None:
         ablmask_resolution = x.shape[1:]
     pth = ( torch.stack([p*torch.ones(ablmask_resolution)
@@ -136,12 +137,10 @@ def optimised_path( model, x, baselines, path_steps, optstep
                    .to(x.device)
              if initpth is None else initpth )
 
-    for i in range(iterations):
+    for i in count():
         current_score = gradientMove_ablation_path(
             model, x, baselines(), abl_seq=pth, optstep=optstep, **kwargs )
-        print(current_score)
-        if abort_criterion(current_score):
-            return pth
+        yield pth, current_score
         if saturation>0:
             pth = (torch.tanh( (pth*2 - torch.ones_like(pth))*saturation )
                           / (np.tanh(saturation))
@@ -158,7 +157,17 @@ def optimised_path( model, x, baselines, path_steps, optstep
         elif filter_sigma>0:
             filterWith(filter_sigma)
         pth = repair_ablation_path(pth)
-    return pth
+
+def optimised_path( model, x, baselines, path_steps, optstep
+                  , iterations, abort_criterion=(lambda scr: False)
+                  , **kwargs):
+    i = 0
+    for pth, current_score in path_optimisation_sequence (
+          model, x, baselines, path_steps, optstep, **kwargs ):
+        if i>=iterations or abort_criterion(current_score):
+            return pth
+        print(current_score)
+        i+=1
 
 def masked_interpolation(x, baseline, abl_seq):
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
