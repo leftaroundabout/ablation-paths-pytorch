@@ -127,7 +127,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
 
 def path_optimisation_sequence (
           model, x, baselines, path_steps, optstep
-        , saturation=0, filter_sigma=0, filter_eta=1
+        , saturation=0, filter_cfg=0, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
         , **kwargs):
     if ablmask_resolution is None:
@@ -151,11 +151,11 @@ def path_optimisation_sequence (
                 w, h = x.shape[1:]
                 scale_factor = np.sqrt(wMask*hMask/(w*h))
             nonlocal pth
-            pth = pth*(1-filter_eta) + apply_filter(pth, σ*scale_factor)*filter_eta
-        if type(filter_sigma) is type(lambda i: 0):
-            filterWith(filter_sigma(i))
-        elif filter_sigma>0:
-            filterWith(filter_sigma)
+            pth = pth*(1-filter_mix_ratio) + apply_filter(pth, σ*scale_factor)*filter_mix_ratio
+        if callable(filter_cfg):
+            filterWith(filter_cfg(i))
+        elif filter_cfg>0:
+            filterWith(filter_cfg)
         pth = repair_ablation_path(pth)
 
 def optimised_path( model, x, baselines, path_steps, optstep

@@ -18,6 +18,7 @@
 ##############################################################################
 
 import numpy as np
+import numbers
 import torch
 
 import scipy as sp
@@ -60,6 +61,12 @@ class FilteringConfig:
     def __init__(self, filter_type, sigma):
         self.filter_type = filter_type
         self.sigma = sigma
+    def __mul__(self, other):
+        assert(isinstance(other, numbers.Number))
+        return FilteringConfig(self.filter_type, self.sigma * other)
+    def __gt__(self, other):
+        assert(isinstance(other, numbers.Number))
+        return self.sigma > other
 
 def apply_filter(image, ftr_conf=6):
     if type(ftr_conf) is not FilteringConfig:
