@@ -19,7 +19,8 @@
 
 import numpy as np
 import torch
-from monotone_paths import project_monotone_lInftymin
+import odl
+from monotone_paths import project_monotone_lInftymin, IntegrationOperator
 from ablation import compute_square_intensity
 from image_filtering import apply_filter
 from itertools import count
@@ -32,17 +33,39 @@ def all_indices(t):
     return result
 
 def monotonise_ablationpath(abl_seq):
-    # This should be generalised to work with any tensor shape,
-    # not just two spatial dimensions
-    for i,j in all_indices(abl_seq[0]):
-        thispixel = abl_seq[:,i,j].cpu().numpy()
-        project_monotone_lInftymin(thispixel)
-        abl_seq[:,i,j] = torch.tensor(thispixel)
+    if type(abl_seq) is torch.Tensor:
+        # This should be generalised to work with any tensor shape,
+        # not just two spatial dimensions
+        for i,j in all_indices(abl_seq[0]):
+            thispixel = abl_seq[:,i,j].cpu().numpy()
+            project_monotone_lInftymin(thispixel)
+            abl_seq[:,i,j] = torch.tensor(thispixel)
+    elif type(abl_seq) is np.ndarray:
+        for i,j in all_indices(abl_seq[0]):
+            thispixel = abl_seq[:,i,j]
+            project_monotone_lInftymin(thispixel)
+            abl_seq[:,i,j] = thispixel
+    elif type(abl_seq) is odl.DiscretizedSpaceElement:
+        ablseq_arr = abl_seq.asarray()
+        for ij in all_indices(ablseq_arr[0]):
+            pixslice = (np.s_[:],) + ij
+            thispixel = ablseq_arr[pixslice]
+            project_monotone_lInftymin(thispixel)
+            ablseq_arr[pixslice] = thispixel
+        abl_seq = abl_seq.space.element(ablseq_arr)
+    else:
+        raise ValueError("This function currently works only with Torch tensors, Numpy arrays or ODL DiscretizedSpace elements.")
 
 def reParamNormalise_ablation_speed(abl_seq):
     n = abl_seq.shape[0]
     masses = np.array([0] + [float(abl_seq[i].mean()) for i in range(n)] + [1])
-    result = torch.zeros_like(abl_seq)
+    zeros_like = (torch.zeros_like
+           if type(abl_seq) is torch.Tensor
+            else np.zeros_like )
+    ones_like = (torch.ones_like
+           if type(abl_seq) is torch.Tensor
+            else np.ones_like )
+    result = zeros_like(abl_seq)
     il = 0
     ir = 1
     for j, m in enumerate(np.linspace(0, 1, n+2)[1:-1]):
@@ -52,8 +75,8 @@ def reParamNormalise_ablation_speed(abl_seq):
             il+=1
         η = (m - masses[il]) / (masses[ir]-masses[il])
         # print("m=%.2f, il=%i, mil=%.2f, ir=%i, mir=%.2f" % (m, il, masses[il], ir, masses[ir]))
-        φl = abl_seq[il-1] if il>0 else torch.zeros_like(abl_seq[0])
-        φr = abl_seq[ir-1] if ir<=n else torch.ones_like(abl_seq[0])
+        φl = abl_seq[il-1] if il>0 else zeros_like(abl_seq[0])
+        φr = abl_seq[ir-1] if ir<=n else ones_like(abl_seq[0])
         result[j] = φl + (φr-φl)*η
     return result
 
@@ -63,9 +86,73 @@ def reParamNormalise_ablation_speed(abl_seq):
 # Note that the argument of this function is mutated.
 def repair_ablation_path(abl_seq):
     monotonise_ablationpath(abl_seq)
-    torch.clamp(abl_seq, 0, 1, out=abl_seq)
-    return reParamNormalise_ablation_speed(abl_seq)
+    if type(abl_seq) is torch.Tensor:
+        torch.clamp(abl_seq, 0, 1, out=abl_seq)
+        return reParamNormalise_ablation_speed(abl_seq)
+    elif type(abl_seq) is np.ndarray:
+        return reParamNormalise_ablation_speed(np.clip(abl_seq, 0, 1))
+    elif type(abl_seq) is odl.DiscretizedSpaceElement:
+        abl_arr = abl_seq.asarray()
+        return abl_seq.space.element(
+            reParamNormalise_ablation_speed(np.clip(abl_arr, 0, 1)))
 
+
+def time_pderiv(dom):
+    return odl.PartialDerivative(dom, axis=0, pad_mode='order1')
+def time_cumu_integral(dom):
+    intg_cell_vol = dom.partition.byaxis[0].cell_volume
+    def integrate(ψ):
+        ψData = np.roll(ψ.asarray(), 1, axis=0)
+        ψData[0] = ψData[1]/2   # trapezoidal and corresponding to
+                                # order-0 extension of PartialDerivative.
+        return dom.element(np.cumsum(ψData, axis=0) * intg_cell_vol )
+    return integrate
+
+def unitIntegralConstraint(intg_op):
+    integrationField = intg_op.range
+    return odl.solvers.functional.IndicatorZero(integrationField
+                        ).translated(integrationField.element(lambda x: x[0]*0 + 1))
+
+def dist2(ψ):
+    return odl.solvers.functional.L2Norm(ψ.space).translated(ψ)
+
+def repair_ablation_path_convexOpt(φ, distancespace_embedding=None, iterations=20):
+    usesODL = type(φ) is odl.DiscretizedSpaceElement
+    usesTorch = type(φ) is torch.Tensor
+    torchdevice = φ.device if usesTorch else None
+    space = φ.space if usesODL else (
+        odl.uniform_discr(min_pt=[0,0,0], max_pt=[1,1,1]
+                   , shape=φ.shape, dtype='float32') )
+    if usesTorch:
+        φ = φ.cpu().numpy()
+    if not usesODL:
+        φ = space.element(φ)
+    if distancespace_embedding is None:
+        distancespace_embedding = odl.IdentityOperator(space)
+    elif distancespace_embedding=='φspace-L²':
+        distancespace_embedding = IntegrationOperator(space, cumu_intg_directions=(0,))
+    nonnegativity = odl.solvers.functional.IndicatorNonnegativity(space)
+    integration_time = IntegrationOperator(space, integration_directions=(0,))
+    unitIntegral_time = unitIntegralConstraint(integration_time)
+    integration_space = IntegrationOperator(
+          space, integration_directions=tuple(range(1, len(space.shape))) )
+    unitIntegral_space = unitIntegralConstraint(integration_space)
+    ψOrig = time_pderiv(space)(φ)
+    ψTgt = distancespace_embedding(ψOrig)
+    ψ = ψOrig.copy()
+    odl.solvers.nonsmooth.pdhg(
+        ψ
+      , nonnegativity
+      , odl.solvers.functional.SeparableSum(dist2(ψTgt), unitIntegral_space, unitIntegral_time)
+      , odl.BroadcastOperator(distancespace_embedding, integration_space, integration_time)
+      , iterations )
+    result = time_cumu_integral(φ.space)(ψ)
+    if usesTorch:
+        return torch.tensor(result.asarray()).to(torchdevice)
+    elif usesODL:
+        return result
+    else:
+        return result.asarray()
 
 def resample_to_reso(v, tgt_shape):
     if len(v.shape) < 4:
@@ -129,6 +216,7 @@ def path_optimisation_sequence (
           model, x, baselines, path_steps, optstep
         , saturation=0, filter_cfg=0, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
+        , pathrepairer=repair_ablation_path
         , **kwargs):
     if ablmask_resolution is None:
         ablmask_resolution = x.shape[1:]
@@ -156,7 +244,7 @@ def path_optimisation_sequence (
             filterWith(filter_cfg(i))
         elif filter_cfg>0:
             filterWith(filter_cfg)
-        pth = repair_ablation_path(pth)
+        pth = pathrepairer(pth)
 
 def optimised_path( model, x, baselines, path_steps, optstep
                   , iterations, abort_criterion=(lambda scr: False)
