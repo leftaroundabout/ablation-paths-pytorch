@@ -168,8 +168,10 @@ class IntegrationOperator(odl.Operator):
         self.all_directions = list(dom.partition.byaxis)
         kept_directions = [i for i in range(len(dom.partition.shape))
                             if i not in integration_directions]
-        ran = odl.discr.uniform_discr_frompartition(
+        ran_ = odl.discr.uniform_discr_frompartition(
                    dom.partition.byaxis[kept_directions])
+        kept_labels = [label for (index, label) in enumerate(input_space.axis_labels) if index not in integration_directions]
+        ran = odl.discr.discr_space.DiscretizedSpace(ran_.partition, ran_.tspace, axis_labels=kept_labels)
         self.integration_directions = integration_directions
         self.intg_cell_vol = dom.partition.byaxis[
                cumu_intg_directions + integration_directions].cell_volume
