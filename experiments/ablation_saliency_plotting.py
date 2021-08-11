@@ -22,6 +22,9 @@ import torch
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 
+import panel as pn
+import holoviews as hv
+
 # from monotone_paths import project_monotone_lInftymin
 # from ablation import compute_square_intensity
 from ablation_paths import masked_interpolation, find_class_transition, resample_to_reso
@@ -119,3 +122,12 @@ def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots
     return transition_loc
 
 
+def interactive_view_mask(abl_seq, **kwargs):
+    inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)-1)
+    hvopts = dict( [ ('width', 600), ('height', 600)
+                   , ('colorbar', True), ('cmap', 'hot') ]
+                 , **kwargs )
+    def show_intermediate(i):
+        intensity = abl_seq[i].cpu().numpy()
+        return hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
+    return pn.Column(inter_select, pn.depends(inter_select.param.value)(show_intermediate))
