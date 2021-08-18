@@ -122,12 +122,24 @@ def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots
     return transition_loc
 
 
-def interactive_view_mask(abl_seq, **kwargs):
+def interactive_view_mask(abl_seq, x=None, baseline=None, viewers_size=None, **kwargs):
     inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)-1)
-    hvopts = dict( [ ('width', 600), ('height', 600)
+    view_interpolation = (x is not None) and (baseline is not None)
+    if viewers_size is None:
+        viewers_size = 350 if view_interpolation else 600
+    hvopts_img = { 'width': viewers_size, 'height': viewers_size }
+    hvopts = dict( [ ('width', viewers_size), ('height', viewers_size)
                    , ('colorbar', True), ('cmap', 'hot') ]
                  , **kwargs )
+    interpol_seq = masked_interpolation(x, baseline, abl_seq
+         ) if view_interpolation else None
     def show_intermediate(i):
         intensity = abl_seq[i].cpu().numpy()
-        return hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
+        maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
+        if view_interpolation:
+            interp_view = hv.RGB((interpol_seq[i].transpose(0,2).cpu().numpy() + 1)/2
+                              ).opts(**hvopts_img)
+            return maskview + interp_view
+        else:
+            return maskview
     return pn.Column(inter_select, pn.depends(inter_select.param.value)(show_intermediate))
