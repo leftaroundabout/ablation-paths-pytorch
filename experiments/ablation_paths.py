@@ -23,6 +23,7 @@ import odl
 from monotone_paths import project_monotone_lInftymin, IntegrationOperator
 from ablation import compute_square_intensity
 from image_filtering import apply_filter
+from imagenet_loading import load_single_image
 from itertools import count
 
 def all_indices(t):
@@ -298,4 +299,14 @@ def find_class_transition( model, x, baseline, abl_seq
     print("imax = %i" % imax)
     return imax
 
-
+def load_ablation_path_from_images(fns, size_spec=None, torchdevice=None):
+    if size_spec is None:
+        reference, _ = load_single_image(fns[0], greyscale=True)
+        size_spec = tuple(reference.shape)
+    path_masks = [ load_single_image(fn, size_spec=size_spec, greyscale=True)[0]
+                      for fn in fns ]
+    path_masks.sort(key = lambda mask: mask.mean())
+    path_candidate = torch.stack(path_masks)
+    if torchdevice is not None:
+        path_candidate = path_candidate.to(torchdevice)
+    return repair_ablation_path(path_candidate)
