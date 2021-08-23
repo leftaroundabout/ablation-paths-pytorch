@@ -121,10 +121,20 @@ def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots
         mp_show_image(axs[i], im)
     return transition_loc
 
+# Irritatingly, HoloViews' + operator only forms a semigroup, not monoid,
+# so concatenating a variable number of plot objects requires this
+# nonstandard "summation".
+def nesum(l):
+    r = l[0]
+    for i in range(1, len(l)):
+        r = r + l[i]
+    return r
 
-def interactive_view_mask(abl_seq, x=None, baseline=None, viewers_size=None, **kwargs):
-    inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)-1)
-    view_interpolation = (x is not None) and (baseline is not None)
+def interactive_view_mask( abl_seq, x=None, baseline=None, view_interpolation=None
+                           , view_masks=True, viewers_size=None, **kwargs ):
+    inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)+2)
+    if view_interpolation is None:
+        view_interpolation = (x is not None) and (baseline is not None)
     if viewers_size is None:
         viewers_size = 350 if view_interpolation else 600
     hvopts_img = { 'width': viewers_size, 'height': viewers_size }
@@ -134,12 +144,18 @@ def interactive_view_mask(abl_seq, x=None, baseline=None, viewers_size=None, **k
     interpol_seq = masked_interpolation(x, baseline, abl_seq
          ) if view_interpolation else None
     def show_intermediate(i):
-        intensity = abl_seq[i].cpu().numpy()
-        maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
+        intensity = np.zeros_like(abl_seq[0].cpu().numpy()
+              ) if i==0 else np.ones_like(abl_seq[0].cpu().numpy())
+        if i>0 and i<=len(abl_seq):
+            intensity = abl_seq[i-1].cpu().numpy()
+        views = []
+        if view_masks:
+            views = views + [hv.Image(intensity.transpose(1,0)).opts(**hvopts).redim.range(z=(1,0))]
         if view_interpolation:
-            interp_view = hv.RGB((interpol_seq[i].transpose(0,2).cpu().numpy() + 1)/2
-                              ).opts(**hvopts_img)
-            return maskview + interp_view
-        else:
-            return maskview
+            interpol_img = x if i==0 else baseline
+            if i>0 and i<=len(abl_seq):
+                interpol_img = interpol_seq[i-1]
+            views = views + [hv.RGB((interpol_img.transpose(0,2).cpu().numpy() + 1)/2
+                              ).opts(**hvopts_img)]
+        return nesum(views)
     return pn.Column(inter_select, pn.depends(inter_select.param.value)(show_intermediate))

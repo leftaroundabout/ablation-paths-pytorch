@@ -299,14 +299,22 @@ def find_class_transition( model, x, baseline, abl_seq
     print("imax = %i" % imax)
     return imax
 
-def load_ablation_path_from_images(fns, size_spec=None, torchdevice=None):
+def load_ablation_path_from_images(fns, size_spec=None, path_steps=None, torchdevice=None):
     if size_spec is None:
         reference, _ = load_single_image(fns[0], greyscale=True)
         size_spec = tuple(reference.shape)
     path_masks = [ load_single_image(fn, size_spec=size_spec, greyscale=True)[0]
                       for fn in fns ]
     path_masks.sort(key = lambda mask: mask.mean())
+    if path_steps is not None and path_steps > len(path_masks):
+        path_masks = [ path_masks[0] for _ in range(path_steps - len(path_masks))
+                     ] + path_masks
     path_candidate = torch.stack(path_masks)
     if torchdevice is not None:
         path_candidate = path_candidate.to(torchdevice)
-    return repair_ablation_path(path_candidate)
+    path_candidate = repair_ablation_path(path_candidate)
+    if path_steps is not None and path_steps < len(path_masks):
+        path_candidate = torch.stack(
+           [ path_candidate[int(len(path_masks)*j/path_steps)]
+            for j in range(path_steps) ])
+    return path_candidate
