@@ -24,6 +24,8 @@ import matplotlib.ticker as mtick
 
 import panel as pn
 import holoviews as hv
+import pandas as pd
+import hvplot.pandas
 
 # from monotone_paths import project_monotone_lInftymin
 # from ablation import compute_square_intensity
@@ -121,6 +123,26 @@ def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots
         mp_show_image(axs[i], im)
     return transition_loc
 
+
+def get_dataframe(results, labels, namer=lambda i: 'im{}'.format(i)):
+    labels_short = [(i, label if len(label)<12 else label[0:11]+"…")
+                     for i, label in labels.items()]
+    pd_res = (
+        pd.concat([
+            pd.DataFrame(labels_short, columns=['ind', 'label']).drop(columns=['ind']), 
+            pd.DataFrame( torch.nn.Softmax(dim=1)(results).cpu().detach().numpy().T
+                        , columns=[namer(i) for i in range(len(results))] )
+                  ],
+                  axis=1)
+        .set_index('label')
+    )
+    return pd_res
+def show_histogram(df, name='im0', width=400, height=400, columns_shown=6, **kwargs):
+    return ( df.sort_values(by=name, ascending=False).iloc[:columns_shown].reset_index()
+               .hvplot.bar(x='label', y=name).opts(
+                   hv.opts.Bars(xrotation=60, width=width, height=height, ylim=(0,1))
+                 , **kwargs) )
+
 # Irritatingly, HoloViews' + operator only forms a semigroup, not monoid,
 # so concatenating a variable number of plot objects requires this
 # nonstandard "summation".
@@ -130,32 +152,50 @@ def nesum(l):
         r = r + l[i]
     return r
 
-def interactive_view_mask( abl_seq, x=None, baseline=None, view_interpolation=None
-                           , view_masks=True, viewers_size=None, **kwargs ):
+class Auto:
+    def __init__(self):
+        pass
+auto = Auto()
+
+def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
+                         , view_masks=True, view_interpolation=auto, view_classification=auto
+                         , viewers_size=auto, classification_name=None, **kwargs ):
+    torchdevice = x.device if x is not None else None
     inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)+2)
-    if view_interpolation is None:
+    if view_interpolation is auto:
         view_interpolation = (x is not None) and (baseline is not None)
-    if viewers_size is None:
+    if view_classification is auto:
+        view_classification = (model is not None) and (labels is not None
+                             ) and (x is not None) and (baseline is not None)
+    if viewers_size is auto:
         viewers_size = 350 if view_interpolation else 600
-    hvopts_img = { 'width': viewers_size, 'height': viewers_size }
-    hvopts = dict( [ ('width', viewers_size), ('height', viewers_size)
-                   , ('colorbar', True), ('cmap', 'hot') ]
-                 , **kwargs )
-    interpol_seq = masked_interpolation(x, baseline, abl_seq
-         ) if view_interpolation else None
+    hvopts_general = { 'width': viewers_size, 'height': viewers_size }
+    hvopts_img = dict( [('data_aspect', 1)], **hvopts_general )
+    hvopts = dict( [ ('colorbar', True), ('cmap', 'hot') ]
+                 , **dict(hvopts_general.items(), **kwargs) )
+    hvopts_classif = hvopts_general.copy()
+    if classification_name is not None:
+        hvopts_classif['name'] = classification_name
+    abl_seq_wEndpoints = torch.cat( [ torch.zeros_like(abl_seq[0:1])
+                                    , abl_seq
+                                    , torch.ones_like(abl_seq[0:1]) ] )
+    interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
+         ) if view_interpolation or view_classification else None
+    if view_classification:
+        classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
     def show_intermediate(i):
-        intensity = np.zeros_like(abl_seq[0].cpu().numpy()
-              ) if i==0 else np.ones_like(abl_seq[0].cpu().numpy())
-        if i>0 and i<=len(abl_seq):
-            intensity = abl_seq[i-1].cpu().numpy()
+        intensity = abl_seq_wEndpoints[i].cpu().numpy()
         views = []
         if view_masks:
             views = views + [hv.Image(intensity.transpose(1,0)).opts(**hvopts).redim.range(z=(1,0))]
         if view_interpolation:
-            interpol_img = x if i==0 else baseline
-            if i>0 and i<=len(abl_seq):
-                interpol_img = interpol_seq[i-1]
+            interpol_img = interpol_seq[i]
             views = views + [hv.RGB((interpol_img.transpose(0,2).cpu().numpy() + 1)/2
                               ).opts(**hvopts_img)]
+        if view_classification:
+            dfopts = {} if classification_name is None else {'namer': lambda _: classification_name}
+            views = views + [show_histogram( get_dataframe(classifications[i:i+1], labels, **dfopts)
+                                           , **hvopts_classif )]
         return nesum(views)
     return pn.Column(inter_select, pn.depends(inter_select.param.value)(show_intermediate))
+
