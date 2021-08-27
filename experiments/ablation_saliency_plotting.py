@@ -172,7 +172,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
     hvopts_general = { 'width': viewers_size, 'height': viewers_size }
     hvopts_img = dict( [('data_aspect', 1)], **hvopts_general )
     hvopts = dict( [ ('colorbar', True), ('cmap', 'hot') ]
-                 , **dict(hvopts_general.items(), **kwargs) )
+                 , **dict(hvopts_img.items(), **kwargs) )
     hvopts_classif = hvopts_general.copy()
     if classification_name is not None:
         hvopts_classif['name'] = classification_name
