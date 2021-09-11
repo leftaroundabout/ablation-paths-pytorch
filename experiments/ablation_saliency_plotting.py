@@ -159,6 +159,7 @@ auto = Auto()
 
 def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
                          , view_masks=True, view_interpolation=auto, view_classification=auto
+                         , view_scoregraph=False
                          , viewers_size=auto, classification_name=None, **kwargs ):
     torchdevice = x.device if x is not None else None
     inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)+2)
@@ -181,21 +182,51 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                     , torch.ones_like(abl_seq[0:1]) ] )
     interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
-    if view_classification:
+    if view_classification or view_scoregraph:
         classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
-    def show_intermediate(i):
+    if view_scoregraph:
+        masses = np.array([float(torch.mean(abl_seq_wEndpoints[i])) for i in range(len(abl_seq)+2)])
+        top_class = int(torch.argmax(classifications[0]))
+        topclass_probs = torch.softmax(classifications, dim=1)[:,top_class].cpu().numpy()
+    def show_intermediate(i, enable_scoregraph=True, enable_others=True):
         intensity = abl_seq_wEndpoints[i].cpu().numpy()
         views = []
-        if view_masks:
-            views = views + [hv.Image(intensity.transpose(1,0)).opts(**hvopts).redim.range(z=(1,0))]
-        if view_interpolation:
+        if view_masks and enable_others:
+            maskview = hv.Image(intensity.transpose(1,0)).opts(**hvopts).redim.range(z=(1,0))
+            views = views + [maskview]
+        if view_interpolation and enable_others:
             interpol_img = interpol_seq[i]
-            views = views + [hv.RGB((interpol_img.transpose(0,2).cpu().numpy() + 1)/2
-                              ).opts(**hvopts_img)]
-        if view_classification:
+            interpolview = hv.RGB((interpol_img.transpose(0,2).cpu().numpy() + 1)/2
+                              ).opts(**hvopts_img)
+            views = views + [interpolview]
+        if view_classification and enable_others:
             dfopts = {} if classification_name is None else {'namer': lambda _: classification_name}
-            views = views + [show_histogram( get_dataframe(classifications[i:i+1], labels, **dfopts)
-                                           , **hvopts_classif )]
-        return nesum(views)
-    return pn.Column(inter_select, pn.depends(inter_select.param.value)(show_intermediate))
+            classifview = show_histogram( get_dataframe(classifications[i:i+1], labels, **dfopts)
+                                           , **hvopts_classif )
+            views = views + [classifview]
+        if view_scoregraph and enable_scoregraph:
+            sgv_opts = { 'width': viewers_size*sum([view_masks, view_interpolation, view_classification])
+                       , 'height': viewers_size//2
+                       , 'xlim':(0,1), 'ylim':(0,1)
+                       , 'xlabel':'t', 'ylabel':'classif←%s'%labels[top_class]
+                       , 'axiswise':True }
+            scoregraphview = ( hv.Area((masses, topclass_probs))
+                                .opts(**sgv_opts)
+                             * hv.Curve(([masses[i],masses[i]], [0,1]))
+                                .opts(color='black', **sgv_opts)
+                             ).opts(**sgv_opts)
+            views = views + [scoregraphview]
+
+        return views
+    if view_scoregraph:
+        return pn.Column( inter_select
+                        , pn.depends(inter_select.param.value)
+                                    (lambda i: hv.Layout(show_intermediate(i, enable_scoregraph=False)))
+                        , pn.depends(inter_select.param.value)
+                                    (lambda i: hv.Layout(show_intermediate(i, enable_others=False)))
+                        )
+    else:
+        return pn.Column( inter_select
+                        , pn.depends(inter_select.param.value)
+                                    (lambda i: hv.Layout(show_intermediate(i))) )
 
