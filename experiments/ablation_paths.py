@@ -218,6 +218,7 @@ def path_optimisation_sequence (
         , saturation=0, filter_cfg=0, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
+        , momentum_inertia=0
         , **kwargs):
     if ablmask_resolution is None:
         ablmask_resolution = x.shape[1:]
@@ -225,11 +226,18 @@ def path_optimisation_sequence (
                          for p in np.linspace(0,1,path_steps)[1:-1]])
                    .to(x.device)
              if initpth is None else initpth )
+    if momentum_inertia>0:
+        momentum = torch.zeros_like(pth)
 
     for i in count():
+        if momentum_inertia>0:
+            old_pth = pth.clone().detach()
         current_score = gradientMove_ablation_path(
             model, x, baselines(), abl_seq=pth, optstep=optstep, **kwargs )
-        yield pth, current_score
+        if momentum_inertia>0:
+            momentum = ( momentum * momentum_inertia
+                        + (pth - old_pth)*(1-momentum_inertia) )
+            pth = old_pth + momentum
         if saturation>0:
             pth = (torch.tanh( (pth*2 - torch.ones_like(pth))*saturation )
                           / (np.tanh(saturation))
@@ -246,6 +254,9 @@ def path_optimisation_sequence (
         elif filter_cfg>0:
             filterWith(filter_cfg)
         pth = pathrepairer(pth)
+        if momentum_inertia>0:
+            momentum = pth - old_pth
+        yield pth, current_score
 
 def optimised_path( model, x, baselines, path_steps, optstep
                   , iterations, abort_criterion=(lambda scr: False)
