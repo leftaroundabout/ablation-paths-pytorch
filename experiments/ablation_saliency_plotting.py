@@ -44,7 +44,9 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
     fig, axs = ( plt.subplots(len(abl_series))
                ) if tgt_subplots is None else (None, tgt_subplots)
     if tgt_subplots is not None:
-        assert(len(tgt_subplots)==len(abl_series) and savename is None)
+        if (len(tgt_subplots)!=len(abl_series)):
+            raise ValueError("Need %i subplot rows, got %i." %(len(abl_series), len(tgt_subplots)))
+        assert(savename is None)
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
 
@@ -69,7 +71,7 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
 
     for i, (method, abl_seq) in enumerate(abl_series):
         predictions = all_predictions[method]
-        sf = axs[i] if len(abl_series)>1 else axs
+        sf = axs[i] if len(abl_series)>1 or tgt_subplots is not None else axs
         for stat_d in ['median', 'min', 'max']:
             sf.fill_between( as_domain(method,0)
                            , predictions_stats[method][stat_d]
@@ -98,14 +100,27 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
 def retrv(t):
     return t.cpu().detach().numpy()
 
+def mp_show_mask(sp, msk, colourmap):
+    sp.set_aspect('equal')
+    sp.axis('off')
+    sp.pcolormesh(retrv(msk), cmap=colourmap)
+
 def mp_show_image(sp, im):
     sp.set_aspect('equal')
     sp.axis('off')
     sp.imshow(retrv(im.transpose(0,2) + 1)/2)
 
+default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
 
-def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots=None
-                                      , manual_loc_select=None, **kwargs):
+class MaskDisplaying:
+    def __init__(self, colourmap='hot'):
+        self.colourmap = colourmap
+
+def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplots=None
+                                      , manual_loc_select=None
+                                      , img_views=default_mask_combo_img_views
+                                      , **kwargs
+                                      ):
     nCh, w, h = x.shape
     def apply_mask(y, mask):
         return y * resample_to_reso(mask.unsqueeze(0), (w,h)).repeat(nCh,1,1)
@@ -115,12 +130,23 @@ def show_mask_combo_at_classTransition(model, x, baseline, abl_seq, tgt_subplots
     mask = abl_seq[transition_loc]
     x_masked = apply_mask(x, 1 - mask)
     bl_masked = apply_mask(baseline, mask)
-    fig,axs = ( plt.subplots(1,3)
+    fig,axs = ( plt.subplots(1,len(img_views))
               ) if tgt_subplots is None else (None,tgt_subplots)
     if tgt_subplots is not None:
-        assert (len(tgt_subplots)==3)
-    for i,im in enumerate([x_masked, x_masked+bl_masked, bl_masked]):
-        mp_show_image(axs[i], im)
+        assert (len(tgt_subplots)==len(img_views))
+    view_options = {
+       'target_original': x
+     , 'target_masked': x_masked
+     , 'interpolation_result': x_masked+bl_masked
+     , 'baseline_antimasked': bl_masked
+     , 'baseline_original': baseline
+     }
+    for i,imview in enumerate(img_views):
+        if isinstance(imview, str):
+            im = view_options[imview]
+            mp_show_image(axs[i], im)
+        else:
+            mp_show_mask(axs[i], 1 - mask, imview.colourmap)
     return transition_loc
 
 

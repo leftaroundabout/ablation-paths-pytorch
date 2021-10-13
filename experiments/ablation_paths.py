@@ -168,11 +168,14 @@ def resample_to_reso(v, tgt_shape):
 
 
 def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=None
-                              , pointwise_scalar_product=False, gradients_postproc=lambda gs: gs):
+                              , pointwise_scalar_product=False, gradients_postproc=lambda gs: gs
+                              ):
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
 
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
+    elif label_nr=='baseline_label':
+        label_nr = torch.argmax(model(baseline.unsqueeze(0)))
     nSq, wMask, hMask = abl_seq.shape
     nCh, wX, hX = x.shape
 
