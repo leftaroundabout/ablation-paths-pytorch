@@ -103,7 +103,7 @@ def retrv(t):
 def mp_show_mask(sp, msk, colourmap):
     sp.set_aspect('equal')
     sp.axis('off')
-    sp.pcolormesh(retrv(msk), cmap=colourmap)
+    sp.pcolormesh(retrv(msk.transpose(0,1).flip(0)), cmap=colourmap)
 
 def mp_show_image(sp, im):
     sp.set_aspect('equal')
