@@ -34,7 +34,8 @@ from ablation_paths import masked_interpolation, find_class_transition, resample
 def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , tgt_subplots=None, savename=None
                         , extras={}
-                        , pretty_method_names={} ):
+                        , pretty_method_names={}
+                        , include_endpoints=True ):
     if callable(baselines):
         baseline_samples = [ baselines()
                               for i in range(12) ]
@@ -52,14 +53,17 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
 
     all_predictions = {
          method: [ torch.softmax(model(torch.stack(
-                               masked_interpolation(x, baseline, abl_seq))
+                               masked_interpolation( x, baseline, abl_seq
+                                                   , include_endpoints=include_endpoints ))
                           ), dim=1).detach()[:,label_nr]
                     for baseline in baseline_samples ]
             for method, abl_seq in abl_series }
 
     def as_domain(method, sampleid):
         n_spl = all_predictions[method][sampleid].shape[0]
-        return np.linspace(1/(n_spl+1), 1-1/(n_spl+1), n_spl)
+        return ( np.linspace(0, 1, n_spl)
+                if include_endpoints
+                 else np.linspace(1/(n_spl+1), 1-1/(n_spl+1), n_spl) )
     
     predictions_stats = {
         method:
@@ -84,7 +88,12 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                             else (0.5,0.5,0,0.5) )
         if method in extras:
             extras[method](sf)
-        sf.text(0.1, 0.1, "score %.3g" % torch.mean(torch.stack(predictions)))
+        def trapez(t):
+            return torch.mean(torch.cat([(t[0:1]+t[-1:])/2, t[1:-1]]))
+        sf.text(0.1, 0.1, "score %.3g" % ( torch.mean(torch.stack([trapez(p) for p in predictions]))
+                                          if include_endpoints
+                                          else torch.mean(torch.stack(predictions)) )
+               )
         sf.set_title(pretty_method_names[method] if method in pretty_method_names
                        else method)
         sf.xaxis.set_major_formatter(mtick.FuncFormatter(

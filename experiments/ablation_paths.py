@@ -272,7 +272,7 @@ def optimised_path( model, x, baselines, path_steps, optstep
         print(current_score)
         i+=1
 
-def masked_interpolation(x, baseline, abl_seq):
+def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
     if type(abl_seq) != torch.Tensor:
         abl_seq = torch.stack(list(abl_seq))
@@ -284,7 +284,13 @@ def masked_interpolation(x, baseline, abl_seq):
                       ).repeat(1,nCh,1,1)
 
     difference = baseline.to(abl_seq.device) - xOpt
-    return [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
+    if include_endpoints:
+        return ( [x] + [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
+                   ).detach()
+                  for i in range(nSq) ]
+                 + [baseline] )
+    else:
+        return [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
                    ).detach()
                   for i in range(nSq) ]
 
