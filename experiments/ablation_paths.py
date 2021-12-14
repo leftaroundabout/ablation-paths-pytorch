@@ -117,7 +117,9 @@ def unitIntegralConstraint(intg_op):
 def dist2(ψ):
     return odl.solvers.functional.L2Norm(ψ.space).translated(ψ)
 
-def repair_ablation_path_convexOpt(φ, distancespace_embedding=None, iterations=20):
+def repair_ablation_path_convexOpt( φ, distancespace_embedding=None
+                                  , extra_penalty_ops=[], iterations=20
+                                  ):
     usesODL = type(φ) is odl.DiscretizedSpaceElement
     usesTorch = type(φ) is torch.Tensor
     torchdevice = φ.device if usesTorch else None
@@ -144,8 +146,18 @@ def repair_ablation_path_convexOpt(φ, distancespace_embedding=None, iterations=
     odl.solvers.nonsmooth.pdhg(
         ψ
       , nonnegativity
-      , odl.solvers.functional.SeparableSum(dist2(ψTgt), unitIntegral_space, unitIntegral_time)
-      , odl.BroadcastOperator(distancespace_embedding, integration_space, integration_time)
+      , odl.solvers.functional.SeparableSum(
+                               dist2(ψTgt)
+                             , unitIntegral_space, unitIntegral_time
+                             , *[ op[1] if isinstance(op, tuple)
+                                   else odl.solvers.functional.IdentityFunctional(op.range)
+                                  for op in extra_penalty_ops]
+                             )
+      , odl.BroadcastOperator( distancespace_embedding
+                             , integration_space, integration_time
+                             , *[ op[0] if isinstance(op, tuple)
+                                   else 0
+                                  for op in extra_penalty_ops] )
       , iterations )
     result = time_cumu_integral(φ.space)(ψ)
     if usesTorch:
