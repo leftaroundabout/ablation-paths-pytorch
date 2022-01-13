@@ -124,7 +124,7 @@ def repair_ablation_path_convexOpt( φ, distancespace_embedding=None
     usesTorch = type(φ) is torch.Tensor
     torchdevice = φ.device if usesTorch else None
     space = φ.space if usesODL else (
-        odl.uniform_discr(min_pt=[0,0,0], max_pt=[1,1,1]
+        odl.uniform_discr(min_pt=[0 for _ in φ.shape], max_pt=[1 for _ in φ.shape]
                    , shape=φ.shape, dtype='float32') )
     if usesTorch:
         φ = φ.cpu().numpy()
@@ -227,6 +227,10 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
         abl_seq += abl_update
     return intg
 
+def saturated_masks(φ, saturation):
+    return (torch.tanh( (φ*2 - torch.ones_like(φ))*saturation )
+                          / (np.tanh(saturation))
+                       + torch.ones_like(φ))/2
 
 def path_optimisation_sequence (
           model, x, baselines, path_steps, optstep
@@ -254,9 +258,7 @@ def path_optimisation_sequence (
                         + (pth - old_pth)*(1-momentum_inertia) )
             pth = old_pth + momentum
         if saturation>0:
-            pth = (torch.tanh( (pth*2 - torch.ones_like(pth))*saturation )
-                          / (np.tanh(saturation))
-                    + torch.ones_like(pth))/2
+            pth = saturate_masks(pth,saturation)
         def filterWith(σ):
             if ablmask_resolution is not None:
                 wMask, hMask = ablmask_resolution
