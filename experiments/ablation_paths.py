@@ -258,7 +258,7 @@ def path_optimisation_sequence (
                         + (pth - old_pth)*(1-momentum_inertia) )
             pth = old_pth + momentum
         if saturation>0:
-            pth = saturate_masks(pth,saturation)
+            pth = saturated_masks(pth,saturation)
         def filterWith(σ):
             if ablmask_resolution is not None:
                 wMask, hMask = ablmask_resolution
