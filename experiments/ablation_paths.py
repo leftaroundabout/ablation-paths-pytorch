@@ -277,13 +277,18 @@ def path_optimisation_sequence (
 
 def optimised_path( model, x, baselines, path_steps, optstep
                   , iterations, abort_criterion=(lambda scr: False)
+                  , logging_destination=None
+                  , progress_on_stdout=False
                   , **kwargs):
     i = 0
     for pth, current_score in path_optimisation_sequence (
           model, x, baselines, path_steps, optstep, **kwargs ):
         if i>=iterations or abort_criterion(current_score):
             return pth
-        print(current_score)
+        if logging_destination is not None:
+            print(current_score, file=logging_destination, flush=True)
+        if progress_on_stdout:
+            print(current_score)
         i+=1
 
 def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
