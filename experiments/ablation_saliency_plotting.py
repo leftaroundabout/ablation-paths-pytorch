@@ -112,12 +112,12 @@ def retrv(t):
 def mp_show_mask(sp, msk, colourmap):
     sp.set_aspect('equal')
     sp.axis('off')
-    sp.pcolormesh(retrv(msk.transpose(0,1).flip(0)), cmap=colourmap)
+    sp.pcolormesh(retrv(msk.flip(0)), cmap=colourmap)
 
 def mp_show_image(sp, im):
     sp.set_aspect('equal')
     sp.axis('off')
-    sp.imshow(retrv(im.transpose(0,2) + 1)/2)
+    sp.imshow(retrv(im.transpose(1,2).transpose(0,2) + 1)/2)
 
 default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
 
@@ -227,11 +227,11 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
         intensity = abl_seq_wEndpoints[i].cpu().numpy()
         views = []
         if view_masks and enable_others:
-            maskview = hv.Image(intensity.transpose(1,0)).opts(**hvopts).redim.range(z=(1,0))
+            maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
         if view_interpolation and enable_others:
             interpol_img = interpol_seq[i]
-            interpolview = hv.RGB((interpol_img.transpose(0,2).cpu().numpy() + 1)/2
+            interpolview = hv.RGB((interpol_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
                               ).opts(**hvopts_img)
             views = views + [interpolview]
         if view_classification and enable_others:
