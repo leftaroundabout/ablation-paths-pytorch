@@ -42,50 +42,65 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
     else:
         baselines_samples = [baselines]
     abl_series = abl_seqs.items()
-    fig, axs = ( plt.subplots(len(abl_series))
+    fig, axs = ( plt.subplots(len(abl_series), squeeze=False)
                ) if tgt_subplots is None else (None, tgt_subplots)
     if tgt_subplots is not None:
         if (len(tgt_subplots)!=len(abl_series)):
             raise ValueError("Need %i subplot rows, got %i." %(len(abl_series), len(tgt_subplots)))
         assert(savename is None)
+    classif_top_label = torch.argmax(model(x.unsqueeze(0)))
     if label_nr is None:
-        label_nr = torch.argmax(model(x.unsqueeze(0)))
+        label_nr = classif_top_label
 
-    all_predictions = {
-         method: [ torch.softmax(model(torch.stack(
-                               masked_interpolation( x, baseline, abl_seq
-                                                   , include_endpoints=include_endpoints ))
-                          ), dim=1).detach()[:,label_nr]
-                    for baseline in baseline_samples ]
-            for method, abl_seq in abl_series }
+    def relevant_predictions():
+        complete_classif = {method: [ torch.softmax(model(torch.stack(
+                                        masked_interpolation( x, baseline, abl_seq
+                                                            , include_endpoints=include_endpoints ))
+                                            ), dim=1).detach()
+                                     for baseline in baseline_samples ]
+                              for method, abl_seq in abl_series }
+        return { vis_class:
+                  { method: [ cl[:,label_acc] for cl in cls ]
+                   for method, cls in complete_classif.items() }
+                for vis_class, label_acc in [('focused', label_nr)
+                                            ,('top', classif_top_label)]
+                 if classif_top_label!=label_nr or vis_class=='focused' }
+    all_predictions = relevant_predictions()
 
     def as_domain(method, sampleid):
-        n_spl = all_predictions[method][sampleid].shape[0]
+        n_spl = all_predictions['focused'][method][sampleid].shape[0]
         return ( np.linspace(0, 1, n_spl)
                 if include_endpoints
                  else np.linspace(1/(n_spl+1), 1-1/(n_spl+1), n_spl) )
     
-    predictions_stats = {
+    predictions_stats = {vis_class: {
         method:
          { fdescr: np.array([f([float(pred[j]) for pred in predictions])
                            for j in range(0, predictions[0].shape[0])])
-            for fdescr, f in [('median', np.median), ('min', np.min), ('max', np.max)]
+            for fdescr, f in (
+                  [('median', np.median), ('min', np.min), ('max', np.max)]
+                   if vis_class=='focused' else [('median', np.median)] )
          }
-         for method, predictions in all_predictions.items() }
+         for method, predictions in rel_predicts.items() }
+      for vis_class, rel_predicts in all_predictions.items() }
 
     for i, (method, abl_seq) in enumerate(abl_series):
-        predictions = all_predictions[method]
+        predictions = all_predictions['focused'][method]
         sf = axs[i] if len(abl_series)>1 or tgt_subplots is not None else axs
         for stat_d in ['median', 'min', 'max']:
             sf.fill_between( as_domain(method,0)
-                           , predictions_stats[method][stat_d]
+                           , predictions_stats['focused'][method][stat_d]
                            , alpha=0.1
                            , color = (0,0.3,0.5,1) )
         for method_c, _ in abl_series:
             sf.plot( as_domain(method_c,0)
-                   , predictions_stats[method_c]['median']
+                   , predictions_stats['focused'][method_c]['median']
                    , color= (0,0.3,0.5,1) if method_c==method
                             else (0.5,0.5,0,0.5) )
+        if classif_top_label!=label_nr:
+            sf.plot( as_domain(method,0)
+                   , predictions_stats['top'][method]['median']
+                   , color= (1.0,0.1,0,0.1) )
         if method in extras:
             extras[method](sf)
         def trapez(t):
