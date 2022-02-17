@@ -19,6 +19,7 @@
 
 import numpy as np
 import torch
+from imageclassifier_model import TrainedTimmModel
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 
@@ -175,11 +176,9 @@ def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplot
 
 
 def get_dataframe(results, labels, namer=lambda i: 'im{}'.format(i)):
-    labels_short = [(i, label if len(label)<12 else label[0:11]+"…")
-                     for i, label in labels.items()]
     pd_res = (
         pd.concat([
-            pd.DataFrame(labels_short, columns=['ind', 'label']).drop(columns=['ind']), 
+            pd.DataFrame(labels.items(), columns=['ind', 'label']).drop(columns=['ind']), 
             pd.DataFrame( torch.nn.Softmax(dim=1)(results).cpu().detach().numpy().T
                         , columns=[namer(i) for i in range(len(results))] )
                   ],
@@ -187,11 +186,34 @@ def get_dataframe(results, labels, namer=lambda i: 'im{}'.format(i)):
         .set_index('label')
     )
     return pd_res
-def show_histogram(df, name='im0', width=400, height=400, columns_shown=6, **kwargs):
-    return ( df.sort_values(by=name, ascending=False).iloc[:columns_shown].reset_index()
-               .hvplot.bar(x='label', y=name).opts(
-                   hv.opts.Bars(xrotation=60, width=width, height=height, ylim=(0,1))
-                 , **kwargs) )
+def show_histogram( df, name='im0', width=400, height=400
+                  , columns_shown=6, guaranteed_labels=[], **kwargs ):
+    if len(guaranteed_labels)>columns_shown:
+        raise ValueError("Cannot show requested labels %s in only %i columns"
+                            % (guaranteed_labels, columns_shown))
+    score_select = df.sort_values(by=name, ascending=False).iloc[:columns_shown]
+    preguaranteed = score_select.index.map(lambda lbl: lbl in guaranteed_labels)
+    n_preguaranteed = len(score_select[preguaranteed])
+    n_non_preguaranteed = columns_shown + n_preguaranteed - len(guaranteed_labels)
+    non_preguaranteed = df.sort_values(by=name, ascending=False).iloc[:n_non_preguaranteed]
+    guaranteed = df.loc[guaranteed_labels]
+    score_select = non_preguaranteed.merge(guaranteed, how='outer', on=['label', name])
+    
+    score_select.index = score_select.index.map(lambda l: '─▶ '+l if l in guaranteed_labels else l)
+    
+    def label_fmt(label):
+      # if label in guaranteed_labels:
+      #     l = '─▶ '+l
+        if len(label)>11:
+           label = label[0:11]+"…"
+        return label
+
+    return ( score_select.reset_index()
+               .hvplot.bar( x='label', y=name).opts(
+                      hv.opts.Bars( xrotation=60
+                                  , xformatter=label_fmt
+                                  , width=width, height=height, ylim=(0,1) )
+                    , **kwargs ) )
 
 # Irritatingly, HoloViews' + operator only forms a semigroup, not monoid,
 # so concatenating a variable number of plot objects requires this
@@ -210,8 +232,12 @@ auto = Auto()
 def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
                          , view_masks=True, view_interpolation=auto, view_classification=auto
                          , view_scoregraph=False
+                         , focused_labels=[]
                          , viewers_size=auto, classification_name=None, **kwargs ):
     torchdevice = x.device if x is not None else None
+    if classification_name is None:
+        if type(model) is TrainedTimmModel:
+            classification_name = model.timm_model_name
     inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)+2)
     if view_interpolation is auto:
         view_interpolation = (x is not None) and (baseline is not None)
@@ -252,7 +278,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
         if view_classification and enable_others:
             dfopts = {} if classification_name is None else {'namer': lambda _: classification_name}
             classifview = show_histogram( get_dataframe(classifications[i:i+1], labels, **dfopts)
-                                           , **hvopts_classif )
+                                           , guaranteed_labels=focused_labels, **hvopts_classif )
             views = views + [classifview]
         if view_scoregraph and enable_scoregraph:
             sgv_opts = { 'width': viewers_size*sum([view_masks, view_interpolation, view_classification])
