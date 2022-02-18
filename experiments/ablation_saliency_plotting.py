@@ -19,6 +19,7 @@
 
 import numpy as np
 import torch
+import torchvision
 from imageclassifier_model import TrainedTimmModel
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
@@ -159,6 +160,33 @@ def overlay_mask_contours(y, mask, contour_colour):
                      ] = contour_colour[i]
     return overlayed
 
+def toHSV(y):
+    return torchvision.transforms.ToTensor()(
+                 torchvision.transforms.ToPILImage()((y + 1)/2).convert("HSV"))
+
+def fromHSV(y):
+    return 2*torchvision.transforms.ToTensor()(
+                 torchvision.transforms.ToPILImage(mode='HSV')(y)
+               .convert("RGB")) - 1
+
+def overlay_mask_as_hue(y, mask):
+    nCh, w, h = y.shape
+
+    def desaturate():
+        hsvI = toHSV(y)
+        hsvI[1,:,:] *= 0.3
+        return fromHSV(hsvI)
+    y_desat = desaturate()
+    
+    # 0.7 is the hue of blue, 0 of red.
+    mask_hue = 0.7 * resample_to_reso(mask.unsqueeze(0), (w,h))
+    
+    spectral_mask_hsv = torch.ones_like(y)
+    spectral_mask_hsv[0,:,:] = mask_hue
+    spectral_mask = fromHSV(spectral_mask_hsv)
+
+    return (3*y_desat + spectral_mask)/4
+
 def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplots=None
                                       , manual_loc_select=None
                                       , img_views=default_mask_combo_img_views
@@ -250,6 +278,8 @@ auto = Auto()
 def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
                          , view_masks=True, view_interpolation=auto, view_classification=auto
                          , view_scoregraph=False
+                         , add_overlay_mask_contours=False
+                         , add_overlay_mask_as_hue=False
                          , focused_labels=[]
                          , viewers_size=auto, classification_name=None, **kwargs ):
     torchdevice = x.device if x is not None else None
@@ -276,10 +306,18 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                     , torch.ones_like(abl_seq[0:1]) ] )
     interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
-    interpol_seq_contours = [ overlay_mask_contours
-                                           ( interpol_seq[i], abl_seq_wEndpoints[i]
+    if add_overlay_mask_as_hue:
+        interpol_seq_maskhint = [ overlay_mask_as_hue
+                                           ( interpol_seq[i], abl_seq_wEndpoints[i] )
+                                   for i in range(len(abl_seq)+2) ]
+    else:
+        interpol_seq_maskhint = interpol_seq
+    if add_overlay_mask_contours:
+        interpol_seq_contours = [ overlay_mask_contours
+                                           ( interpol_seq_maskhint[i], abl_seq_wEndpoints[i]
                                            , contour_colour=torch.tensor([1,-1,-0.5]) )
-                               for i in range(len(abl_seq)+2) ]
+                                   for i in range(len(abl_seq)+2) ]
+        interpol_seq_maskhint = interpol_seq_contours
     if view_classification or view_scoregraph:
         classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
     if view_scoregraph:
@@ -294,7 +332,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
             maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
         if view_interpolation and enable_others:
-            interpol_img = interpol_seq_contours[i]
+            interpol_img = interpol_seq_maskhint[i]
             interpolview = hv.RGB((interpol_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
                               ).opts(**hvopts_img)
             views = views + [interpolview]
