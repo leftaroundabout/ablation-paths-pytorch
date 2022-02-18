@@ -141,6 +141,24 @@ class MaskDisplaying:
     def __init__(self, colourmap='hot'):
         self.colourmap = colourmap
 
+def overlay_mask_contours(y, mask, contour_colour):
+    nCh, w, h = y.shape
+    msk_cheby_threshold = (float(torch.max(mask)) + float(torch.min(mask)))/2
+    crossings_horiz = torch.abs(torch.diff(torch.sign(
+                                  resample_to_reso(mask.unsqueeze(0), (w+1,h)) # strictly speaking we should apply
+                                         - msk_cheby_threshold)                # padding instead of rescaling to w+1
+                        , axis=1))
+    crossings_vert = torch.abs(torch.diff(torch.sign(
+                                  resample_to_reso(mask.unsqueeze(0), (w,h+1))
+                                         - msk_cheby_threshold)
+                        , axis=2))
+    overlayed = y.clone()
+    if contour_colour.shape==(nCh,):
+        for i in range(nCh):
+            overlayed[i, crossings_horiz[0] + crossings_vert[0] > 0
+                     ] = contour_colour[i]
+    return overlayed
+
 def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplots=None
                                       , manual_loc_select=None
                                       , img_views=default_mask_combo_img_views
@@ -258,10 +276,15 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                     , torch.ones_like(abl_seq[0:1]) ] )
     interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
+    interpol_seq_contours = [ overlay_mask_contours
+                                           ( interpol_seq[i], abl_seq_wEndpoints[i]
+                                           , contour_colour=torch.tensor([1,-1,-0.5]) )
+                               for i in range(len(abl_seq)+2) ]
     if view_classification or view_scoregraph:
         classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
     if view_scoregraph:
-        masses = np.array([float(torch.mean(abl_seq_wEndpoints[i])) for i in range(len(abl_seq)+2)])
+        masses = np.array([float(torch.mean(abl_seq_wEndpoints[i]))
+                             for i in range(len(abl_seq)+2)])
         top_class = int(torch.argmax(classifications[0]))
         topclass_probs = torch.softmax(classifications, dim=1)[:,top_class].cpu().numpy()
     def show_intermediate(i, enable_scoregraph=True, enable_others=True):
@@ -271,12 +294,13 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
             maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
         if view_interpolation and enable_others:
-            interpol_img = interpol_seq[i]
+            interpol_img = interpol_seq_contours[i]
             interpolview = hv.RGB((interpol_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
                               ).opts(**hvopts_img)
             views = views + [interpolview]
         if view_classification and enable_others:
-            dfopts = {} if classification_name is None else {'namer': lambda _: classification_name}
+            dfopts = {} if classification_name is None else {
+                             'namer': lambda _: classification_name}
             classifview = show_histogram( get_dataframe(classifications[i:i+1], labels, **dfopts)
                                            , guaranteed_labels=focused_labels, **hvopts_classif )
             views = views + [classifview]
