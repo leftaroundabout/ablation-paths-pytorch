@@ -162,22 +162,22 @@ def overlay_mask_contours(y, mask, contour_colour):
 
 def toHSV(y):
     return torchvision.transforms.ToTensor()(
-                 torchvision.transforms.ToPILImage()((y + 1)/2).convert("HSV"))
+                 torchvision.transforms.ToPILImage()((y + 1)/2).convert("HSV")
+            ).to(y.device)
 
 def fromHSV(y):
     return 2*torchvision.transforms.ToTensor()(
                  torchvision.transforms.ToPILImage(mode='HSV')(y)
-               .convert("RGB")) - 1
+               .convert("RGB")).to(y.device) - 1
 
-def overlay_mask_as_hue(y, mask):
+def desaturate(y, saturation=0.3):
+    hsvI = toHSV(y)
+    hsvI[1,:,:] *= saturation
+    return fromHSV(hsvI)
+
+def overlay_mask_as_hue(y, mask, y_saturation=0.3):
     nCh, w, h = y.shape
 
-    def desaturate():
-        hsvI = toHSV(y)
-        hsvI[1,:,:] *= 0.3
-        return fromHSV(hsvI)
-    y_desat = desaturate()
-    
     # 0.7 is the hue of blue, 0 of red.
     mask_hue = 0.7 * resample_to_reso(mask.unsqueeze(0), (w,h))
     
@@ -185,7 +185,20 @@ def overlay_mask_as_hue(y, mask):
     spectral_mask_hsv[0,:,:] = mask_hue
     spectral_mask = fromHSV(spectral_mask_hsv)
 
-    return (3*y_desat + spectral_mask)/4
+    return (3*desaturate(y, y_saturation) + spectral_mask)/4
+
+def overlay_mask_deemphasizeirrelevant(
+                y, mask
+              , outside_saturation=0.3, outside_contrast=0.5, outside_brightness=-0.3 ):
+    if not 0<=outside_contrast<=1:
+        raise ValueError("Contrast must be between 0 and 1")
+    if np.abs(outside_brightness) > 1 - outside_contrast:
+        raise ValueError("Brightness adjustment must be between {} and {}"
+                           .format(outside_contrast-1, 1-outside_contrast))
+    return ( masked_interpolation
+              ( y, outside_contrast*desaturate(y, outside_saturation)
+                     + outside_brightness
+              , mask.unsqueeze(0) )[0] )
 
 def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplots=None
                                       , manual_loc_select=None
@@ -275,8 +288,58 @@ class Auto:
         pass
 auto = Auto()
 
+class MaskViewOverlay:
+    def __init__(self, precomposes=[]):
+        self.precomposes=precomposes
+    def __call__(self, y, mask):
+        for f in reversed(self.precomposes):
+            y = f(y, mask)
+        return y
+    def __mul__(self, other):
+        return MaskViewOverlay([self, other])
+
+class DeemphasizeIrrelevant(MaskViewOverlay):
+    def __init__(self, outside_saturation=0.3, outside_contrast=0.5, outside_brightness=-0.3):
+        self.outside_saturation=outside_saturation
+        self.outside_contrast=outside_contrast
+        self.outside_brightness=outside_brightness
+    def __call__(self, y, mask):
+        return overlay_mask_deemphasizeirrelevant( y, mask
+                 , outside_saturation=self.outside_saturation
+                 , outside_contrast=self.outside_contrast
+                 , outside_brightness=self.outside_brightness )
+
+class MaskAsHueOverlay(MaskViewOverlay):
+    def __init__(self, y_saturation=0.3):
+        self.y_saturation=y_saturation
+    def __call__(self, y, mask):
+        return overlay_mask_as_hue( y, mask
+                 , y_saturation=self.y_saturation )
+
+class MaskMidlevelContour(MaskViewOverlay):
+    def __init__(self, contour_colour):
+        self.contour_colour=contour_colour
+    def __call__(self, y, mask):
+        return overlay_mask_contours(y, mask, contour_colour=self.contour_colour)
+
+class OverlayWithFullySaturatedMask(MaskViewOverlay):
+    def __init__(self, overlay_method):
+        self.overlay_method = overlay_method
+    def __call__(self, y, mask):
+        nCh, w, h = y.shape
+        msk_cheby_threshold = (float(torch.max(mask)) + float(torch.min(mask)))/2
+        mask_hr = resample_to_reso(mask.unsqueeze(0), (w,h))[0]
+        if msk_cheby_threshold<0.5:
+            mask_hr[mask_hr <= msk_cheby_threshold] = 0
+            mask_hr[mask_hr > msk_cheby_threshold] = 1
+        else:
+            mask_hr[mask_hr < msk_cheby_threshold] = 0
+            mask_hr[mask_hr >= msk_cheby_threshold] = 1
+        return self.overlay_method(y, mask_hr)
+
 def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
-                         , view_masks=True, view_interpolation=auto, view_classification=auto
+                         , view_x=DeemphasizeIrrelevant()
+                         , view_masks=False, view_interpolation=auto, view_classification=auto
                          , view_scoregraph=False
                          , add_overlay_mask_contours=False
                          , add_overlay_mask_as_hue=False
@@ -312,6 +375,15 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                    for i in range(len(abl_seq)+2) ]
     else:
         interpol_seq_maskhint = interpol_seq
+    if view_x is True:
+        x_view_seq = [ x for i in range(len(abl_seq)+2) ]
+        do_x_view = True
+    elif isinstance(view_x, MaskViewOverlay):
+        x_view_seq = [ view_x( x, abl_seq_wEndpoints[i] )
+                                   for i in range(len(abl_seq)+2) ]
+        do_x_view = True
+    else:
+        do_x_view = False
     if add_overlay_mask_contours:
         interpol_seq_contours = [ overlay_mask_contours
                                            ( interpol_seq_maskhint[i], abl_seq_wEndpoints[i]
@@ -328,6 +400,11 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
     def show_intermediate(i, enable_scoregraph=True, enable_others=True):
         intensity = abl_seq_wEndpoints[i].cpu().numpy()
         views = []
+        if do_x_view:
+            xview_img = x_view_seq[i]
+            xview = hv.RGB((xview_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
+                              ).opts(**hvopts_img)
+            views = views + [xview]
         if view_masks and enable_others:
             maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
