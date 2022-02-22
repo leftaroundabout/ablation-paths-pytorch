@@ -32,6 +32,7 @@ import hvplot.pandas
 # from monotone_paths import project_monotone_lInftymin
 # from ablation import compute_square_intensity
 from ablation_paths import masked_interpolation, find_class_transition, resample_to_reso
+from image_filtering import apply_gaussian_filter
 
 def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , tgt_subplots=None, savename=None
@@ -142,7 +143,7 @@ class MaskDisplaying:
     def __init__(self, colourmap='hot'):
         self.colourmap = colourmap
 
-def overlay_mask_contours(y, mask, contour_colour):
+def overlay_mask_contours(y, mask, contour_colour, contour_width=2):
     nCh, w, h = y.shape
     msk_cheby_threshold = (float(torch.max(mask)) + float(torch.min(mask)))/2
     crossings_horiz = torch.abs(torch.diff(torch.sign(
@@ -153,10 +154,16 @@ def overlay_mask_contours(y, mask, contour_colour):
                                   resample_to_reso(mask.unsqueeze(0), (w,h+1))
                                          - msk_cheby_threshold)
                         , axis=2))
+    contour = torch.zeros_like(crossings_horiz)
+    contour[crossings_horiz + crossings_vert > 0] = 1
+    if contour_width > 1:
+        contour = apply_gaussian_filter(contour, contour_width)
+        contour[contour < 1/(4*contour_width)] = 0
+        contour[contour > 0] = 1
     overlayed = y.clone()
     if contour_colour.shape==(nCh,):
         for i in range(nCh):
-            overlayed[i, crossings_horiz[0] + crossings_vert[0] > 0
+            overlayed[i, contour[0] > 0
                      ] = contour_colour[i]
     return overlayed
 
@@ -317,10 +324,13 @@ class MaskAsHueOverlay(MaskViewOverlay):
                  , y_saturation=self.y_saturation )
 
 class MaskMidlevelContour(MaskViewOverlay):
-    def __init__(self, contour_colour):
+    def __init__(self, contour_colour, contour_width=2):
         self.contour_colour=contour_colour
+        self.contour_width=contour_width
     def __call__(self, y, mask):
-        return overlay_mask_contours(y, mask, contour_colour=self.contour_colour)
+        return overlay_mask_contours( y, mask
+           , contour_colour=self.contour_colour
+           , contour_width=self.contour_width )
 
 class OverlayWithFullySaturatedMask(MaskViewOverlay):
     def __init__(self, overlay_method):
