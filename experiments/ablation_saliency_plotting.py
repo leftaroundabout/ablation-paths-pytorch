@@ -23,6 +23,7 @@ import torchvision
 from imageclassifier_model import TrainedTimmModel
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
+import matplotlib.gridspec as grid
 
 import panel as pn
 import holoviews as hv
@@ -38,12 +39,16 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , tgt_subplots=None, savename=None
                         , extras={}
                         , pretty_method_names={}
+                        , classification_name=None
                         , include_endpoints=True ):
     if callable(baselines):
         baseline_samples = [ baselines()
                               for i in range(12) ]
     else:
         baselines_samples = [baselines]
+    if classification_name is None:
+        if type(model) is TrainedTimmModel:
+            classification_name = model.timm_model_name
     abl_series = abl_seqs.items()
     fig, axs = ( plt.subplots(len(abl_series), squeeze=False)
                ) if tgt_subplots is None else (None, tgt_subplots)
@@ -108,9 +113,12 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
             extras[method](sf)
         def trapez(t):
             return torch.mean(torch.cat([(t[0:1]+t[-1:])/2, t[1:-1]]))
-        sf.text(0.1, 0.1, "score %.3g" % ( torch.mean(torch.stack([trapez(p) for p in predictions]))
+        sf.text(0.1, 0.1, "score %.3g%s"
+                               % ( torch.mean(torch.stack([trapez(p) for p in predictions]))
                                           if include_endpoints
-                                          else torch.mean(torch.stack(predictions)) )
+                                          else torch.mean(torch.stack(predictions))
+                                     , " (%s)" % classification_name
+                                        if classification_name is not None else "" )
                )
         sf.set_title(pretty_method_names[method] if method in pretty_method_names
                        else method)
@@ -137,7 +145,10 @@ def mp_show_image(sp, im):
     sp.axis('off')
     sp.imshow(retrv(im.transpose(1,2).transpose(0,2) + 1)/2)
 
-default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
+class MaskOverlayed:
+    def __init__(self, img_topic, mask_overlayer):
+        self.img_topic = img_topic
+        self.mask_overlayer = mask_overlayer
 
 class MaskDisplaying:
     def __init__(self, colourmap='hot'):
@@ -207,7 +218,39 @@ def overlay_mask_deemphasizeirrelevant(
                      + outside_brightness
               , mask.unsqueeze(0) )[0] )
 
-def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplots=None
+default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
+
+def mpplotgrid_score_below_image( n_abl_seqs, n_imgviews, n_extra_rows=0
+                                , figsize=None, gridspec_kw={} ):
+    fig = plt.figure(constrained_layout=True, figsize=figsize)
+    gs = grid.GridSpec(2*n_abl_seqs + n_extra_rows, n_imgviews, **gridspec_kw)
+    axs = np.asarray(
+           [ [ fig.add_subplot(gs[2*j + 1, :]) ] + [
+              fig.add_subplot(gs[2*j, i])
+               for i in range(n_imgviews) ]
+            for j in range(n_abl_seqs) ] )
+    return fig, axs
+
+def mpplotgrid_for_maskcombos( n_abl_seqs, n_imgviews
+                             , n_extra_rows=0, extra_row_height=2
+                             , scoreplot_below_images=True ):
+    if scoreplot_below_images:
+        fig,axs = mpplotgrid_score_below_image(
+                               n_abl_seqs, n_imgviews
+                             , n_extra_rows=n_extra_rows
+                             , figsize=( 3*n_imgviews
+                                       , 4.5*n_abl_seqs + extra_row_height*n_extra_rows )
+                             , gridspec_kw={'height_ratios': [h for _ in range(n_abl_seqs)
+                                                               for h in [3,1.5]]
+                                                              + [2 for _ in range(n_extra_rows)] } )
+    else:
+        fig,axs = plt.subplots( n_abl_seqs, n_imgviews, squeeze=False
+                              , figsize=(4+2*n_imgviews, 2*(n_abl_seqs+extra_rows))
+                              , gridspec_kw={'width_ratios': [2.5] + [1 for _ in range (n_imgviews)]} )
+    return fig, axs
+
+def show_mask_combo_at_classTransition( model, x, baseline, abl_seq
+                                      , tgt_subplots=None, scoreplot_below_images=True
                                       , manual_loc_select=None
                                       , img_views=default_mask_combo_img_views
                                       , **kwargs
@@ -221,10 +264,12 @@ def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplot
     mask = abl_seq[transition_loc]
     x_masked = apply_mask(x, 1 - mask)
     bl_masked = apply_mask(baseline, mask)
-    fig,axs = ( plt.subplots(1,len(img_views))
-              ) if tgt_subplots is None else (None,tgt_subplots)
-    if tgt_subplots is not None:
+    if tgt_subplots is None:
+        fig,axs = mpplotgrid_for_maskcombos(n_abl_seqs, n_imgviews, scoreplot_below_images)
+        axs = axs[0]
+    else:
         assert (len(tgt_subplots)==len(img_views))
+        fig,axs = (None, tgt_subplots)
     view_options = {
        'target_original': x
      , 'target_masked': x_masked
@@ -236,8 +281,13 @@ def show_mask_combo_at_classTransition( model, x, baseline, abl_seq, tgt_subplot
         if isinstance(imview, str):
             im = view_options[imview]
             mp_show_image(axs[i], im)
-        else:
+        elif isinstance(imview, MaskOverlayed):
+            im = imview.mask_overlayer(view_options[imview.img_topic], mask)
+            mp_show_image(axs[i], im)
+        elif isinstance(imview, MaskDisplaying):
             mp_show_mask(axs[i], 1 - mask, imview.colourmap)
+        else:
+            raise TypeError("Unknown image view type "+str(imview))
     return transition_loc
 
 
@@ -324,7 +374,7 @@ class MaskAsHueOverlay(MaskViewOverlay):
                  , y_saturation=self.y_saturation )
 
 class MaskMidlevelContour(MaskViewOverlay):
-    def __init__(self, contour_colour, contour_width=2):
+    def __init__(self, contour_colour=torch.tensor([1,-1,-0.5]), contour_width=2):
         self.contour_colour=contour_colour
         self.contour_width=contour_width
     def __call__(self, y, mask):
@@ -346,6 +396,13 @@ class OverlayWithFullySaturatedMask(MaskViewOverlay):
             mask_hr[mask_hr < msk_cheby_threshold] = 0
             mask_hr[mask_hr >= msk_cheby_threshold] = 1
         return self.overlay_method(y, mask_hr)
+
+intuitive_saliency_mask_combo_img_views = [
+    MaskOverlayed( 'target_original'
+                 , MaskMidlevelContour()
+                  * OverlayWithFullySaturatedMask(DeemphasizeIrrelevant()) )
+  , MaskOverlayed( 'interpolation_result', MaskMidlevelContour() )
+  ]
 
 def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
                          , view_x=DeemphasizeIrrelevant()
