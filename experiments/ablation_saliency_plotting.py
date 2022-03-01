@@ -220,33 +220,45 @@ def overlay_mask_deemphasizeirrelevant(
 
 default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
 
-def mpplotgrid_score_below_image( n_abl_seqs, n_imgviews, n_extra_rows=0
+def mpplotgrid_score_below_image( n_abl_seqs, n_imgviews, n_columns=1, n_extra_rows=0
                                 , figsize=None, gridspec_kw={} ):
     fig = plt.figure(constrained_layout=True, figsize=figsize)
-    gs = grid.GridSpec(2*n_abl_seqs + n_extra_rows, n_imgviews, **gridspec_kw)
+    n_abl_seqs_per_column = -(n_abl_seqs//-n_columns)
+    gs = grid.GridSpec( 2*n_abl_seqs_per_column + n_extra_rows
+                      , n_imgviews*n_columns, **gridspec_kw )
     axs = np.asarray(
-           [ [ fig.add_subplot(gs[2*j + 1, :]) ] + [
-              fig.add_subplot(gs[2*j, i])
-               for i in range(n_imgviews) ]
+           [ ( [ fig.add_subplot(gs[ 2*(j // n_columns) + 1
+                                   , (j % n_columns)*n_imgviews
+                                      : (j % n_columns + 1)*n_imgviews ]) ]
+              + [fig.add_subplot(gs[ 2*(j // n_columns)
+                                   , (j % n_columns)*n_imgviews + i ])
+                                          for i in range(n_imgviews) ] )
             for j in range(n_abl_seqs) ] )
     return fig, axs
 
-def mpplotgrid_for_maskcombos( n_abl_seqs, n_imgviews
+def mpplotgrid_for_maskcombos( n_abl_seqs, n_imgviews, n_columns=1
                              , n_extra_rows=0, extra_row_height=2
                              , scoreplot_below_images=True ):
+    n_abl_seqs_per_column = -(n_abl_seqs//-n_columns)  # rounding towards +∞
     if scoreplot_below_images:
         fig,axs = mpplotgrid_score_below_image(
-                               n_abl_seqs, n_imgviews
+                               n_abl_seqs, n_imgviews, n_columns=n_columns
                              , n_extra_rows=n_extra_rows
-                             , figsize=( 3*n_imgviews
-                                       , 4.5*n_abl_seqs + extra_row_height*n_extra_rows )
-                             , gridspec_kw={'height_ratios': [h for _ in range(n_abl_seqs)
-                                                               for h in [3,1.5]]
+                             , figsize=( 3*n_imgviews*n_columns
+                                       , 4.5*n_abl_seqs_per_column + extra_row_height*n_extra_rows )
+                             , gridspec_kw={'height_ratios':
+                                            [h for _ in range(n_abl_seqs_per_column)
+                                                for h in [3,1]]
                                                               + [2 for _ in range(n_extra_rows)] } )
     else:
-        fig,axs = plt.subplots( n_abl_seqs, n_imgviews, squeeze=False
-                              , figsize=(4+2*n_imgviews, 2*(n_abl_seqs+extra_rows))
-                              , gridspec_kw={'width_ratios': [2.5] + [1 for _ in range (n_imgviews)]} )
+        n_sidecells = n_imgviews+1
+        fig,axsg = plt.subplots( n_abl_seqs_per_column, n_sidecells*n_columns, squeeze=False
+                               , figsize=((4+2*n_imgviews)*n_columns, 2*(n_abl_seqs+extra_rows))
+                               , gridspec_kw={'width_ratios': ([2.5] + [1 for _ in range (n_imgviews)])
+                                                               * n_columns } )
+        axs = np.asarray([ [axsg[j//n_columns, (j%n_columns)*n_sidecells + x]
+                            for x in range(n_sidecells)]
+                          for j in range(n_abl_seqs) ])
     return fig, axs
 
 def show_mask_combo_at_classTransition( model, x, baseline, abl_seq
@@ -356,7 +368,7 @@ class MaskViewOverlay:
         return MaskViewOverlay([self, other])
 
 class DeemphasizeIrrelevant(MaskViewOverlay):
-    def __init__(self, outside_saturation=0.3, outside_contrast=0.5, outside_brightness=-0.3):
+    def __init__(self, outside_saturation=0.5, outside_contrast=2/3, outside_brightness=-0.2):
         self.outside_saturation=outside_saturation
         self.outside_contrast=outside_contrast
         self.outside_brightness=outside_brightness
