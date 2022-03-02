@@ -37,6 +37,7 @@ from image_filtering import apply_gaussian_filter
 
 def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , tgt_subplots=None, savename=None
+                        , label_name=None, labels=None
                         , extras={}
                         , pretty_method_names={}
                         , classification_name=None
@@ -113,12 +114,19 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
             extras[method](sf)
         def trapez(t):
             return torch.mean(torch.cat([(t[0:1]+t[-1:])/2, t[1:-1]]))
-        sf.text(0.1, 0.1, "score %.3g%s"
-                               % ( torch.mean(torch.stack([trapez(p) for p in predictions]))
+        this_score = ( torch.mean(torch.stack([trapez(p) for p in predictions]))
                                           if include_endpoints
-                                          else torch.mean(torch.stack(predictions))
-                                     , " (%s)" % classification_name
-                                        if classification_name is not None else "" )
+                                          else torch.mean(torch.stack(predictions)) )
+        if label_name is None and labels is not None:
+            label_name = labels[label_nr]
+        score_descr = ( "%s → %s" % (classification_name, label_name)
+                         if classification_name is not None and label_name is not None
+                       else classification_name if classification_name is not None
+                       else label_name          if label_name is not None
+                       else None )
+        sf.text(0.1, 0.1, "score %.3g%s"
+                               % ( this_score, " (%s)" % score_descr
+                                               if score_descr is not None else "" )
                )
         sf.set_title(pretty_method_names[method] if method in pretty_method_names
                        else method)
