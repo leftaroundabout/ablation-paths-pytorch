@@ -201,7 +201,7 @@ def desaturate(y, saturation=0.3):
     hsvI[1,:,:] *= saturation
     return fromHSV(hsvI)
 
-def overlay_mask_as_hue(y, mask, y_saturation=0.3):
+def overlay_mask_as_hue(y, mask, y_saturation=0.3, y_prominence=1.0):
     nCh, w, h = y.shape
 
     # 0.7 is the hue of blue, 0 of red.
@@ -211,7 +211,8 @@ def overlay_mask_as_hue(y, mask, y_saturation=0.3):
     spectral_mask_hsv[0,:,:] = mask_hue
     spectral_mask = fromHSV(spectral_mask_hsv)
 
-    return (3*desaturate(y, y_saturation) + spectral_mask)/4
+    return (3*y_prominence*desaturate(y, y_saturation) + spectral_mask
+             )/(3*y_prominence+1)
 
 def overlay_mask_deemphasizeirrelevant(
                 y, mask
@@ -278,10 +279,12 @@ def show_mask_combo_at_classTransition( model, x, baseline, abl_seq
     nCh, w, h = x.shape
     def apply_mask(y, mask):
         return y * resample_to_reso(mask.unsqueeze(0), (w,h)).repeat(nCh,1,1)
-    transition_loc = find_class_transition(model, x, baseline, abl_seq, **kwargs
+    transition_loc = (find_class_transition(model, x, baseline, abl_seq, **kwargs) - 1
         ) if manual_loc_select is None else (
-         int(manual_loc_select * abl_seq.shape[0]) )
-    mask = abl_seq[transition_loc]
+         round(manual_loc_select * (abl_seq.shape[0]+2)) - 1 )
+    mask = ( torch.zeros_like(abl_seq[0]) if transition_loc<0
+         else abl_seq[transition_loc] if transition_loc<abl_seq.shape[0]
+         else torch.ones_like(abl_seq[0]) )
     x_masked = apply_mask(x, 1 - mask)
     bl_masked = apply_mask(baseline, mask)
     if tgt_subplots is None:
@@ -387,11 +390,13 @@ class DeemphasizeIrrelevant(MaskViewOverlay):
                  , outside_brightness=self.outside_brightness )
 
 class MaskAsHueOverlay(MaskViewOverlay):
-    def __init__(self, y_saturation=0.3):
+    def __init__(self, y_saturation=0.3, y_prominence=1.0):
         self.y_saturation=y_saturation
+        self.y_prominence=y_prominence
     def __call__(self, y, mask):
         return overlay_mask_as_hue( y, mask
-                 , y_saturation=self.y_saturation )
+                 , y_saturation=self.y_saturation
+                 , y_prominence=self.y_prominence )
 
 class MaskMidlevelContour(MaskViewOverlay):
     def __init__(self, contour_colour=torch.tensor([1,-1,-0.5]), contour_width=2):
