@@ -34,7 +34,8 @@ def multi_argsort(arr):
     return np.stack(list(produce_ixs())).transpose()
 
 
-def pixel_ablation_sequence( model, x, baseline, saliency_method
+def pixel_ablation_sequence( model, x, baseline, saliency_method=None
+                     , precomputed_saliency=None
                      , saliency_smoothing = lambda x: x
                      , ablmask_resolution = None
                      , nb_steps=8, path_steps=24, label_nr=None, submethod=None ):
@@ -43,7 +44,12 @@ def pixel_ablation_sequence( model, x, baseline, saliency_method
                                                 , nb_steps=nb_steps, label_nr=label_nr )
                                  )]), dim=0).reshape(x.shape)
 
-    if saliency_method in ['IG', 'IG-reverse']:
+    if saliency_method is None:
+        if precomputed_saliency is None:
+            raise ValueError("No saliency mask or standard method specified.")
+        else:
+            saliency = precomputed_saliency
+    elif saliency_method in ['IG', 'IG-reverse']:
         saliency = ( compute_square_intensity(avg_grad)
                     * compute_square_intensity(x-baseline) )
     elif saliency_method in ["IG'", "IG'-reverse"]:
@@ -53,7 +59,7 @@ def pixel_ablation_sequence( model, x, baseline, saliency_method
     elif saliency_method in ['AG', 'AG-reverse', 'random']:
         saliency = compute_square_intensity(avg_grad)
     else:
-        print("Unknown saliency method '%s'" % saliency_method)
+        raise ValueError("Unknown saliency method '%s'" % saliency_method)
 
     if saliency_method == 'random':
         saliency = torch.rand_like(saliency)

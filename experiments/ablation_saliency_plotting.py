@@ -431,6 +431,19 @@ class OverlayWithFullySaturatedMask(MaskViewOverlay):
             mask_hr[mask_hr >= msk_cheby_threshold] = 1
         return self.overlay_method(y, mask_hr)
 
+class OverlayWithManuallyOverridenMask(MaskViewOverlay):
+    def __init__(self, overlay_method, mask_override):
+        self.overlay_method = overlay_method
+        self.mask_override = mask_override
+    def __call__(self, y, mask):
+        return self.overlay_method(y, self.mask_override)
+
+class ManualOverrideMaskOverlayed(MaskOverlayed):
+    def __init__(self, img_topic, mask_overlayer, mask_override):
+        self.img_topic = img_topic
+        self.mask_overlayer = OverlayWithManuallyOverridenMask(mask_overlayer, mask_override)
+
+
 intuitive_saliency_mask_combo_img_views = [
     MaskOverlayed( 'target_original'
                  , MaskMidlevelContour()
