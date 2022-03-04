@@ -169,7 +169,7 @@ def repair_ablation_path_convexOpt( φ, distancespace_embedding=None
 
 def resample_to_reso(v, tgt_shape):
     if len(v.shape) < 4:
-        return resample_to_reso(v.unsqueeze(1), tgt_shape).squeeze(1)
+        return resample_to_reso(v.unsqueeze(0), tgt_shape).squeeze(0)
     elif v.shape[2:] == tgt_shape:
         return v
     else:
