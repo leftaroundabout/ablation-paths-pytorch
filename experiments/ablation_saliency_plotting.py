@@ -158,6 +158,11 @@ class MaskOverlayed:
         self.img_topic = img_topic
         self.mask_overlayer = mask_overlayer
 
+class AverageMaskOverlayed:
+    def __init__(self, img_topic, mask_overlayer):
+        self.img_topic = img_topic
+        self.mask_overlayer = mask_overlayer
+
 class MaskDisplaying:
     def __init__(self, colourmap='hot'):
         self.colourmap = colourmap
@@ -303,6 +308,10 @@ def show_mask_combo_at_classTransition( model, x, baseline, abl_seq
     for i,imview in enumerate(img_views):
         if isinstance(imview, str):
             im = view_options[imview]
+            mp_show_image(axs[i], im)
+        elif isinstance(imview, AverageMaskOverlayed):
+            avg_mask = torch.mean(abl_seq, dim=(0,))
+            im = imview.mask_overlayer(view_options[imview.img_topic], avg_mask)
             mp_show_image(axs[i], im)
         elif isinstance(imview, MaskOverlayed):
             im = imview.mask_overlayer(view_options[imview.img_topic], mask)
