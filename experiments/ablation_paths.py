@@ -25,6 +25,7 @@ from ablation import compute_square_intensity
 from image_filtering import apply_filter
 from imagenet_loading import load_single_image
 from itertools import count
+from abc import ABC, abstractmethod
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -178,9 +179,29 @@ def resample_to_reso(v, tgt_shape):
                                               , mode='bilinear', align_corners=False )
         
 
+def invertible_sigmoid(x):
+    return torch.sigmoid(x)
+def inverse_sigmoid(y):
+    # https://stackoverflow.com/a/66116934/745903
+    return -torch.log(torch.reciprocal(y) - 1)
 
-def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=None
-                              , pointwise_scalar_product=False, gradients_postproc=lambda gs: gs
+class OptstepStrategy(ABC):
+    @abstractmethod
+    def factor_for_update(self, grad):
+        return NotImplemented
+
+class ConstOptStep(OptstepStrategy):
+    def __init__(self, const_update_factor):
+        self.const_update_factor = const_update_factor
+    def factor_for_update(self, grad):
+        return self.const_update_factor
+
+def gradientMove_ablation_path( model, x, baseline, abl_seq
+                              , optstep
+                              , label_nr=None
+                              , pointwise_scalar_product=False
+                              , gradients_postproc=lambda gs: gs
+                              , optimise_behind_sigmoid=False
                               ):
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
 
@@ -191,15 +212,58 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
     nSq, wMask, hMask = abl_seq.shape
     nCh, wX, hX = x.shape
 
-    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
-                      ).repeat(1,nCh,1,1)
-    xOpt = x.to(abl_seq.device)
-    difference = baseline.to(abl_seq.device) - xOpt
+    # Suitably reshaped and resampled version of mask, for applying (with
+    # auto-broadcast channel dimension) to target- and baseline images.
+    resampled_abl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
+                      ).detach()
+    if optimise_behind_sigmoid:
+        resampled_abl_seq = inverse_sigmoid(resampled_abl_seq)
+        raise NotImplementedError("Behind-sigmoid optimisation")
+
+    x_opt = x.to(abl_seq.device)
     
+    def as_const_seq(y):
+        return y.unsqueeze(0).repeat((nSq,)+tuple(1 for _ in y.shape))
+
+    x_clones = as_const_seq(x_opt)
+    difference = as_const_seq(baseline.to(abl_seq.device) - x_opt)
+    
+    assert(pointwise_scalar_product
+      ), "Optimising without pointwise scalar product currently not supported."
+
+    resampled_abl_seq.requires_grad = True
+    argument = (x_opt + difference.to(abl_seq.device)*resampled_abl_seq
+                   )
+    
+    # Ablation path score, computed as the "integral": average of the
+    # target-class probability over the path.
+    intg_score = torch.sum(torch.softmax(model(argument)[:,:,0,0], -1)[:, label_nr])/nSq
+
+    # Gradient of the integral-score, as a function of the entire mask-path;
+    # in shape of its oversampled form.
+    grad = torch.autograd.grad( intg_score
+                              , resampled_abl_seq )[0][:,0]
+    assert(grad.shape==(nSq, wX, hX))
+    
+    grad = gradients_postproc(grad)
+
+    update = resample_to_reso(grad, (wMask, hMask))
+
+    if optstep is None:
+        raise NotImplementedError("Automatic opt-step selection")
+    elif isinstance(optstep, OptstepStrategy):
+        update *= optstep.factor_for_update(update)
+    
+    abl_seq += update
+
+    return float(intg_score)
+
+    ### Old version, taking the pointwise scalar product separately instead of
+    #   as part of the to-be-optimised computation.
+    gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
+
     # The path score, which is to be computed as an integral.
     intg = 0
-
-    gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
 
     for i in range(nSq):
         argument = (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
