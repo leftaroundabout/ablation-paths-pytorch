@@ -187,14 +187,21 @@ def inverse_sigmoid(y):
 
 class OptstepStrategy(ABC):
     @abstractmethod
-    def factor_for_update(self, grad):
+    def factor_for_update(self, update):
         return NotImplemented
 
-class ConstOptStep(OptstepStrategy):
+class ConstFactorOptStep(OptstepStrategy):
     def __init__(self, const_update_factor):
         self.const_update_factor = const_update_factor
-    def factor_for_update(self, grad):
+    def factor_for_update(self, update):
         return self.const_update_factor
+
+class LInftyNormalizingOptStep(OptstepStrategy):
+    def __init__(self, update_supremum):
+        self.update_supremum = update_supremum
+    def factor_for_update(self, update):
+        norm = float(torch.max(torch.abs(update)))
+        return 1/norm
 
 def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , optstep
@@ -212,13 +219,17 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     nSq, wMask, hMask = abl_seq.shape
     nCh, wX, hX = x.shape
 
+    # If optimising "behind the sigmoid", use a representation
+    # of the ablation path that is not limited to the range [0,1]
+    delimited_abl_seq = ( inverse_sigmoid(abl_seq)
+                         if optimise_behind_sigmoid
+                         else abl_seq )
+
     # Suitably reshaped and resampled version of mask, for applying (with
     # auto-broadcast channel dimension) to target- and baseline images.
-    resampled_abl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
-                      ).detach()
-    if optimise_behind_sigmoid:
-        resampled_abl_seq = inverse_sigmoid(resampled_abl_seq)
-        raise NotImplementedError("Behind-sigmoid optimisation")
+    resampled_abl_seq = resample_to_reso( delimited_abl_seq.reshape(nSq,1,wMask,hMask)
+                                        , (wX, hX)
+                                        ).detach()
 
     x_opt = x.to(abl_seq.device)
     
@@ -232,12 +243,15 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
       ), "Optimising without pointwise scalar product currently not supported."
 
     resampled_abl_seq.requires_grad = True
-    argument = (x_opt + difference.to(abl_seq.device)*resampled_abl_seq
+    argument = (x_opt + difference.to(abl_seq.device)
+                         *(invertible_sigmoid(resampled_abl_seq)
+                            if optimise_behind_sigmoid
+                            else resampled_abl_seq)
                    )
     
     # Ablation path score, computed as the "integral": average of the
     # target-class probability over the path.
-    intg_score = torch.sum(torch.softmax(model(argument)[:,:,0,0], -1)[:, label_nr])/nSq
+    intg_score = torch.mean(torch.softmax(model(argument)[:,:,0,0], -1)[:, label_nr])
 
     # Gradient of the integral-score, as a function of the entire mask-path;
     # in shape of its oversampled form.
@@ -251,10 +265,23 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
 
     if optstep is None:
         raise NotImplementedError("Automatic opt-step selection")
+    elif isinstance(optstep, float):
+        update *= optstep
     elif isinstance(optstep, OptstepStrategy):
         update *= optstep.factor_for_update(update)
     
-    abl_seq += update
+    def print_range(info, t):
+        print(f"{info}=({float(torch.min(t))}, {float(torch.max(t))})")
+
+    # print_range("old_range", abl_seq)
+    # print_range("delimited_range", delimited_abl_seq)
+
+    if optimise_behind_sigmoid:
+        abl_seq[:] = invertible_sigmoid(delimited_abl_seq + update)
+    else:
+        abl_seq += update
+
+    # print_range("new_range", abl_seq)
 
     return float(intg_score)
 
