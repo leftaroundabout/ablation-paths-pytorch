@@ -379,7 +379,7 @@ def optimised_path( model, x, baselines, path_steps, optstep
         if logging_destination is not None:
             print(current_score, file=logging_destination, flush=True)
         if progress_on_stdout:
-            print(current_score)
+            print(current_score, end="\r")
         i+=1
 
 def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):

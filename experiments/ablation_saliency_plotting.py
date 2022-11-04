@@ -362,6 +362,8 @@ def show_histogram( df, name='im0', width=400, height=400
                                   , xformatter=label_fmt
                                   , width=width, height=height, ylim=(0,1) )
                     , **kwargs ) )
+def classification_histogram( model, x, labels, name='im0', **kwargs ):
+    return show_histogram(get_dataframe(model(x), labels=labels), **kwargs)
 
 # Irritatingly, HoloViews' + operator only forms a semigroup, not monoid,
 # so concatenating a variable number of plot objects requires this
@@ -457,8 +459,12 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                          , view_scoregraph=False
                          , add_overlay_mask_contours=False
                          , add_overlay_mask_as_hue=False
+                         , image_valrange=(-1,1)
                          , focused_labels=[]
                          , viewers_size=auto, classification_name=None, **kwargs ):
+    def to_unit_range(y):
+        return (2*y - image_valrange[0] - image_valrange[1]
+               ) / (image_valrange[1] - image_valrange[0])
     torchdevice = x.device if x is not None else None
     if classification_name is None:
         if type(model) is TrainedTimmModel:
@@ -483,17 +489,18 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                     , torch.ones_like(abl_seq[0:1]) ] )
     interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
+    interpol_seq_normrng = [to_unit_range(i) for i in interpol_seq]
     if add_overlay_mask_as_hue:
         interpol_seq_maskhint = [ overlay_mask_as_hue
-                                           ( interpol_seq[i], abl_seq_wEndpoints[i] )
+                                           ( interpol_seq_normrng[i], abl_seq_wEndpoints[i] )
                                    for i in range(len(abl_seq)+2) ]
     else:
-        interpol_seq_maskhint = interpol_seq
+        interpol_seq_maskhint = interpol_seq_normrng
     if view_x is True:
         x_view_seq = [ x for i in range(len(abl_seq)+2) ]
         do_x_view = True
     elif isinstance(view_x, MaskViewOverlay):
-        x_view_seq = [ view_x( x, abl_seq_wEndpoints[i] )
+        x_view_seq = [ view_x( to_unit_range(x), abl_seq_wEndpoints[i] )
                                    for i in range(len(abl_seq)+2) ]
         do_x_view = True
     else:
@@ -506,26 +513,29 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
         interpol_seq_maskhint = interpol_seq_contours
     if view_classification or view_scoregraph:
         classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
+        clshape = classifications.shape
+        classifications = classifications.reshape(len(abl_seq)+2, clshape[1])
     if view_scoregraph:
         masses = np.array([float(torch.mean(abl_seq_wEndpoints[i]))
                              for i in range(len(abl_seq)+2)])
         top_class = int(torch.argmax(classifications[0]))
         topclass_probs = torch.softmax(classifications, dim=1)[:,top_class].cpu().numpy()
+    def hvRGB(y):
+        return hv.RGB((y.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
+                      ).opts(**hvopts_img)
     def show_intermediate(i, enable_scoregraph=True, enable_others=True):
         intensity = abl_seq_wEndpoints[i].cpu().numpy()
         views = []
         if do_x_view:
             xview_img = x_view_seq[i]
-            xview = hv.RGB((xview_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
-                              ).opts(**hvopts_img)
+            xview = hvRGB(xview_img)
             views = views + [xview]
         if view_masks and enable_others:
             maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
         if view_interpolation and enable_others:
             interpol_img = interpol_seq_maskhint[i]
-            interpolview = hv.RGB((interpol_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
-                              ).opts(**hvopts_img)
+            interpolview = hvRGB(interpol_img)
             views = views + [interpolview]
         if view_classification and enable_others:
             dfopts = {} if classification_name is None else {
