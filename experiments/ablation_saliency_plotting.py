@@ -461,6 +461,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                          , add_overlay_mask_as_hue=False
                          , image_valrange=(-1,1)
                          , focused_labels=[]
+                         , objective_class=None
                          , viewers_size=auto, classification_name=None, **kwargs ):
     def to_unit_range(y):
         return (2*y - image_valrange[0] - image_valrange[1]
@@ -519,7 +520,9 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
         masses = np.array([float(torch.mean(abl_seq_wEndpoints[i]))
                              for i in range(len(abl_seq)+2)])
         top_class = int(torch.argmax(classifications[0]))
-        topclass_probs = torch.softmax(classifications, dim=1)[:,top_class].cpu().numpy()
+        if objective_class is None:
+            objective_class = top_class
+        objective_class_probs = torch.softmax(classifications, dim=1)[:,objective_class].cpu().numpy()
     def hvRGB(y):
         return hv.RGB((y.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
                       ).opts(**hvopts_img)
@@ -547,9 +550,9 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
             sgv_opts = { 'width': viewers_size*sum([view_masks, view_interpolation, view_classification])
                        , 'height': viewers_size//2
                        , 'xlim':(0,1), 'ylim':(0,1)
-                       , 'xlabel':'t', 'ylabel':'classif←%s'%labels[top_class]
+                       , 'xlabel':'t', 'ylabel':'classif←%s'%labels[objective_class]
                        , 'axiswise':True }
-            scoregraphview = ( hv.Area((masses, topclass_probs))
+            scoregraphview = ( hv.Area((masses, objective_class_probs))
                                 .opts(**sgv_opts)
                              * hv.Curve(([masses[i],masses[i]], [0,1]))
                                 .opts(color='black', **sgv_opts)
