@@ -219,17 +219,18 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     nSq, wMask, hMask = abl_seq.shape
     nCh, wX, hX = x.shape
 
-    # If optimising "behind the sigmoid", use a representation
-    # of the ablation path that is not limited to the range [0,1]
-    delimited_abl_seq = ( inverse_sigmoid(abl_seq)
-                         if optimise_behind_sigmoid
-                         else abl_seq )
 
     # Suitably reshaped and resampled version of mask, for applying (with
     # auto-broadcast channel dimension) to target- and baseline images.
-    resampled_abl_seq = resample_to_reso( delimited_abl_seq.reshape(nSq,1,wMask,hMask)
+    resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq,1,wMask,hMask)
                                         , (wX, hX)
                                         ).detach()
+
+    # If optimising "behind the sigmoid", use a representation
+    # of the ablation path that is not limited to the range [0,1]
+    delimited_abl_seq = ( inverse_sigmoid(resampled_abl_seq)
+                         if optimise_behind_sigmoid
+                         else resampled_abl_seq )
 
     x_opt = x.to(abl_seq.device)
     
@@ -242,11 +243,11 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     assert(pointwise_scalar_product
       ), "Optimising without pointwise scalar product currently not supported."
 
-    resampled_abl_seq.requires_grad = True
+    delimited_abl_seq.requires_grad = True
     argument = (x_opt + difference.to(abl_seq.device)
-                         *(invertible_sigmoid(resampled_abl_seq)
+                         *(invertible_sigmoid(delimited_abl_seq)
                             if optimise_behind_sigmoid
-                            else resampled_abl_seq)
+                            else delimited_abl_seq)
                    )
     
     # Ablation path score, computed as the "integral": average of the
@@ -256,19 +257,18 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     # Gradient of the integral-score, as a function of the entire mask-path;
     # in shape of its oversampled form.
     grad = torch.autograd.grad( intg_score
-                              , resampled_abl_seq )[0][:,0]
+                              , delimited_abl_seq )[0][:,0]
     assert(grad.shape==(nSq, wX, hX))
     
     grad = gradients_postproc(grad)
 
-    update = resample_to_reso(grad, (wMask, hMask))
-
     if optstep is None:
         raise NotImplementedError("Automatic opt-step selection")
     elif isinstance(optstep, float):
-        update *= optstep
+        update = grad * optstep
     elif isinstance(optstep, OptstepStrategy):
-        update *= optstep.factor_for_update(update)
+        update = grad * optstep.factor_for_update(grad)
+    assert(update.shape==(nSq, wX, hX))
     
     def print_range(info, t):
         print(f"{info}=({float(torch.min(t))}, {float(torch.max(t))})")
@@ -276,16 +276,20 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     # print_range("old_range", abl_seq)
     # print_range("delimited_range", delimited_abl_seq)
 
-    if optimise_behind_sigmoid:
-        abl_seq[:] = invertible_sigmoid(delimited_abl_seq + update)
-    else:
-        abl_seq += update
+    delimited_abl_seq = delimited_abl_seq[:,0] + update
+
+    resampled_abl_seq = (
+      invertible_sigmoid(delimited_abl_seq)
+       if optimise_behind_sigmoid
+       else delimited_abl_seq ).detach()
+
+    abl_seq[:] = resample_to_reso(resampled_abl_seq, (wMask, hMask))
 
     # print_range("new_range", abl_seq)
 
     return float(intg_score)
 
-    ### Old version, taking the pointwise scalar product separately instead of
+    ### OLD VERSION, taking the pointwise scalar product separately instead of
     #   as part of the to-be-optimised computation.
     gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
 
@@ -379,7 +383,8 @@ def optimised_path( model, x, baselines, path_steps, optstep
         if logging_destination is not None:
             print(current_score, file=logging_destination, flush=True)
         if progress_on_stdout:
-            print(current_score, end="\r")
+            sat = float(path_saturation(pth))
+            print(f"saturation: {sat:.2f}, score: {current_score:.3f}", end="\r")
         i+=1
 
 def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
