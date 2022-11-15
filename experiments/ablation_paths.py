@@ -370,15 +370,62 @@ def path_optimisation_sequence (
             momentum = pth - old_pth
         yield pth, current_score
 
+class PathOptFinishCriterion(ABC):
+    def __init__(self, subcriteria_dnf):
+        self._subcriteria_dnf = subcriteria_dnf
+
+    def __call__(self, iterations_done, abl_path, score):
+        return any([all([c(iterations_done, abl_path, score)
+                          for c in cs])
+                     for cs in self._subcriteria_dnf])
+
+    def _as_criteria_dnf(self):
+        return ( self._subcriteria_dnf
+                if (type(self) is PathOptFinishCriterion)
+                else [[self]] )
+
+    def _as_criteria_conjunction(self):
+        return ( self._subcriteria_dnf[0]
+                if (type(self) is PathOptFinishCriterion
+                     and len(self._subcriteria_dnf)==1)
+                else [self] )
+
+    def __or__(self, other):
+        return PathOptFinishCriterion(
+           self._as_criteria_dnf() + other._as_criteria_dnf() )
+
+    def __and__(self, other):
+        return PathOptFinishCriterion(
+           [self._as_criteria_conjunction() + other._as_criteria_conjunction()] )
+
+class FixedStepCount(PathOptFinishCriterion):
+    def __init__(self, n_iterations):
+        self.n_iterations = n_iterations
+
+    def __call__(self, iterations_done, abl_path, score):
+        return iterations_done >= self.n_iterations
+
+def path_saturation(abl_path):
+    return torch.mean(2 * torch.abs(abl_path - 0.5));
+
+class SaturationTarget(PathOptFinishCriterion):
+    def __init__(self, saturation_target):
+        self.saturation_target = saturation_target
+
+    def __call__(self, iterations_done, abl_path, score):
+        return float(path_saturation(abl_path)
+                    ) >= self.saturation_target
+
+
 def optimised_path( model, x, baselines, path_steps, optstep
-                  , iterations, abort_criterion=(lambda scr: False)
+                  , finish_criterion
                   , logging_destination=None
                   , progress_on_stdout=False
                   , **kwargs):
     i = 0
     for pth, current_score in path_optimisation_sequence (
           model, x, baselines, path_steps, optstep, **kwargs ):
-        if i>=iterations or abort_criterion(current_score):
+        if finish_criterion(i, pth, current_score):
             return pth
         if logging_destination is not None:
             print(current_score, file=logging_destination, flush=True)
