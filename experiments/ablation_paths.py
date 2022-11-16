@@ -179,11 +179,30 @@ def resample_to_reso(v, tgt_shape):
                                               , mode='bilinear', align_corners=False )
         
 
-def invertible_sigmoid(x):
-    return torch.sigmoid(x)
-def inverse_sigmoid(y):
-    # https://stackoverflow.com/a/66116934/745903
-    return -torch.log(torch.reciprocal(y) - 1)
+class RangeRemapping(ABC):
+    @abstractmethod
+    def to_unitinterval(self, x):
+        return NotImplemented
+    @abstractmethod
+    def from_unitinterval(self, y):
+        return NotImplemented
+
+class IdentityRemapping(RangeRemapping):
+    def __init__(self):
+        pass
+    def to_unitinterval(self, x):
+        return x
+    def from_unitinterval(self, y):
+        return y
+
+class SigmoidRemapping(RangeRemapping):
+    def __init__(self):
+        pass
+    def to_unitinterval(self, x):
+        return torch.sigmoid(x)
+    def from_unitinterval(self, y):
+        # https://stackoverflow.com/a/66116934/745903
+        return -torch.log(torch.reciprocal(y) - 1)
 
 class OptstepStrategy(ABC):
     @abstractmethod
@@ -208,7 +227,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , label_nr=None
                               , pointwise_scalar_product=False
                               , gradients_postproc=lambda gs: gs
-                              , optimise_behind_sigmoid=False
+                              , range_remapping = IdentityRemapping()
                               ):
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
 
@@ -226,11 +245,9 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
                                         , (wX, hX)
                                         ).detach()
 
-    # If optimising "behind the sigmoid", use a representation
+    # If given a suitable remapping function, use it for a representation
     # of the ablation path that is not limited to the range [0,1]
-    delimited_abl_seq = ( inverse_sigmoid(resampled_abl_seq)
-                         if optimise_behind_sigmoid
-                         else resampled_abl_seq )
+    delimited_abl_seq = range_remapping.from_unitinterval(resampled_abl_seq)
 
     x_opt = x.to(abl_seq.device)
     
@@ -245,9 +262,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
 
     delimited_abl_seq.requires_grad = True
     argument = (x_opt + difference.to(abl_seq.device)
-                         *(invertible_sigmoid(delimited_abl_seq)
-                            if optimise_behind_sigmoid
-                            else delimited_abl_seq)
+                         * range_remapping.to_unitinterval(delimited_abl_seq)
                    )
     
     # Ablation path score, computed as the "integral": average of the
@@ -278,10 +293,8 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
 
     delimited_abl_seq = delimited_abl_seq[:,0] + update
 
-    resampled_abl_seq = (
-      invertible_sigmoid(delimited_abl_seq)
-       if optimise_behind_sigmoid
-       else delimited_abl_seq ).detach()
+    resampled_abl_seq = range_remapping.to_unitinterval(delimited_abl_seq
+                           ).detach()
 
     abl_seq[:] = resample_to_reso(resampled_abl_seq, (wMask, hMask))
 
