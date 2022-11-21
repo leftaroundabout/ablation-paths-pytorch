@@ -208,6 +208,35 @@ class SelectableHardnessClipping(RangeRemapping):
     def __init__(self, hardness=2):
         self.hardness=hardness
     def from_unitinterval(self, y):
+        return y - (1/y + 1/(y-1))/self.hardness
+    def to_unitinterval(self, x):
+        # x = y − (1/y + 1/(y−1))/h
+        # x·h·y·(y-1) = h·y²·(y−1) − (y−1) − y
+        # x·h·y² − x·h·y − h·y³ + h·y² + 2·y − 1 = 0
+        # y³ − (x+1)·y² + (x−2/h)·y + 1/h = 0
+        # y =: t + (x+1)/3
+        # y² = t² + ⅔·t·(x+1) + (x+1)²/9
+        # y³ = t³ + t²·(x+1) + t·(x+1)²/3 + (x+1)³/27
+        # t³ + t²·(x+1) + t·(x+1)²/3 + (x+1)³/27
+        #  − (x+1)·(t² + ⅔·t·(x+1) + (x+1)²/9)
+        #  + (x−2/h)·(t + (x+1)/3) + 1/h = 0
+        # t³ − (x+1)²·t/3 − 2/27·(x+1)³
+        #  + (x−2/h)·t + (x−2/h)·(x+1)/3 + 1/h = 0
+        # 0 = t³
+        #      + (x − (x+1)²/3 − 2/h)·t              } p
+        #      + (x−2/h)·(x+1)/3 − 2/27·(x+1)³ + 1/h } q
+        h = self.hardness
+        p = x - (x+1)**2/3 - 2/h
+        q = (x-2/h)*(x+1)/3 - 2/27*(x+1)**3 + 1/h
+        # w := √(-p/3)
+        w = torch.sqrt(-p/3)
+        t = 2*w*torch.cos(torch.acos(3*q/(2*p*w))/3 - 2*np.pi/3)
+        return t + (x+1)/3
+
+class SelectableHardnessSigmoid(RangeRemapping):
+    def __init__(self, hardness=2):
+        self.hardness=hardness
+    def from_unitinterval(self, y):
         z = 2*y - 1   # Change range to [-1,1]
         return z + z / (self.hardness * (1 - z**2))
     def to_unitinterval(self, x):
@@ -215,7 +244,7 @@ class SelectableHardnessClipping(RangeRemapping):
         # h·x·(1-z²) = z·h·(1−z²) + z
         # h·x − h·x·z² = z·h − h·z³ + z
         # h·z³ − h·x·z² − z·(1 + h) + h·x = 0
-        # z = t + x/3
+        # z =: t + x/3
         # h·(t + x/3)³ − h·x·(t + x/3)² − (t + x/3)·(1+h) + h·x = 0
         # h·t³ + h·x·t² + h·x²·t/3 + h·x³/27
         #              − h·x·t² − ⅔·h·x²·t − h·x³/9
