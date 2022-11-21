@@ -204,6 +204,37 @@ class SigmoidRemapping(RangeRemapping):
         # https://stackoverflow.com/a/66116934/745903
         return -torch.log(torch.reciprocal(y) - 1)
 
+class SelectableHardnessClipping(RangeRemapping):
+    def __init__(self, hardness=2):
+        self.hardness=hardness
+    def from_unitinterval(self, y):
+        z = 2*y - 1   # Change range to [-1,1]
+        return z + z / (self.hardness * (1 - z**2))
+    def to_unitinterval(self, x):
+        # x = z + z/(h·(1−z²))
+        # h·x·(1-z²) = z·h·(1−z²) + z
+        # h·x − h·x·z² = z·h − h·z³ + z
+        # h·z³ − h·x·z² − z·(1 + h) + h·x = 0
+        # z = t + x/3
+        # h·(t + x/3)³ − h·x·(t + x/3)² − (t + x/3)·(1+h) + h·x = 0
+        # h·t³ + h·x·t² + h·x²·t/3 + h·x³/27
+        #              − h·x·t² − ⅔·h·x²·t − h·x³/9
+        #                               − t − h·t − x/3 − h·x/3
+        #                                                 + h·x = 0
+        # h·t³ − (h·x²/3 + 1 + h)·t − h·x³·2/27 − x/3 + ⅔·h·x = 0
+        # t³ − (x²/3 + 1/h + 1)·t − x³·2/27 − x/3h + ⅔·x = 0
+        # p := -(x²/3 + 1/h + 1)
+        p = -(x**2/3 + 1/self.hardness + 1)
+        # q := -x³·2/27 − x/3h + ⅔·x
+        q = -x**3*2/27 - x/(3*self.hardness) + 2/3*x
+        # w := √(-p/3)
+        w = torch.sqrt(-p/3)
+        # t = 2·w·cos(⅓·acos(3·q/(2·p·w)) − ⅔·π)
+        # (Viète 2006, doi:10.1017/S0025557200179598)
+        t = 2*w*torch.cos(torch.acos(3*q/(2*p*w))/3 - 2*np.pi/3)
+        z = t + x/3
+        return (z+1) / 2
+
 class OptstepStrategy(ABC):
     @abstractmethod
     def factor_for_update(self, update):
