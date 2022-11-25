@@ -24,6 +24,7 @@ from imageclassifier_model import TrainedTimmModel
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import matplotlib.gridspec as grid
+from matplotlib.colors import to_rgb
 
 import panel as pn
 import holoviews as hv
@@ -232,6 +233,27 @@ def overlay_mask_deemphasizeirrelevant(
                      + outside_brightness
               , mask.unsqueeze(0) )[0] )
 
+def overlay_mask_argmin(
+                y, mask
+              , crosshair_radius=5
+              , crosshair_colour='red' ):
+    crosshair_colour = to_rgb(crosshair_colour)
+    iys, ixs = torch.meshgrid([torch.arange(n) for n in y.shape[1:]])
+    iys_mask, ixs_mask = torch.meshgrid([
+          torch.tensor(np.linspace(0, y.shape[j+1], mask.shape[j], endpoint=False))
+        for j in [0,1] ])
+    iflat_am = torch.argmin(mask)
+    iy_am = round(float(iys_mask.flatten()[iflat_am]))
+    ix_am = round(float(ixs_mask.flatten()[iflat_am]))
+    ch_hori = (ixs==ix_am) & (iys >= iy_am-crosshair_radius
+                         ) & (iys <= iy_am+crosshair_radius)
+    ch_vert = (iys==iy_am) & (ixs >= ix_am-crosshair_radius
+                         ) & (ixs <= ix_am+crosshair_radius)
+    for j in range(y.shape[0]):
+        y[j][ch_hori | ch_vert] = crosshair_colour[j]*2 - 1
+    
+    return y
+
 default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
 
 def mpplotgrid_score_below_image( n_abl_seqs, n_imgviews, n_columns=1, n_extra_rows=0
@@ -417,6 +439,16 @@ class MaskMidlevelContour(MaskViewOverlay):
         return overlay_mask_contours( y, mask
            , contour_colour=self.contour_colour
            , contour_width=self.contour_width )
+
+class MaskArgminOverlay(MaskViewOverlay):
+    def __init__(self, crosshair_radius=5, crosshair_colour='red' ):
+        self.crosshair_radius=crosshair_radius
+        self.crosshair_colour=crosshair_colour
+    def __call__(self, y, mask):
+        return overlay_mask_argmin(
+                y, mask
+              , crosshair_radius=self.crosshair_radius
+              , crosshair_colour=self.crosshair_colour )
 
 class OverlayWithFullySaturatedMask(MaskViewOverlay):
     def __init__(self, overlay_method):
