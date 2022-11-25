@@ -529,12 +529,9 @@ def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
                    ).detach()
                   for i in range(nSq) ]
 
-# The name of this function is somewhat misleading. It only considers
-# transitions from the requested class to another one. In the case where there
-# is no clear class transition, it picks instead the slice with the highest
-# absolute prediction for the requested class.
-def find_class_transition( model, x, baseline, abl_seq
-                         , minimum_ablation_pos=0.25, label_nr=None ):
+def most_salient_mask_in_path( abl_seq, model, x, baseline
+                             , minimum_ablation_pos=0.25, label_nr=None
+                             , fallback_to_best_scoring=True ):
     if len(abl_seq) <= 1:
         return 0
 
@@ -548,18 +545,22 @@ def find_class_transition( model, x, baseline, abl_seq
     while imax>=min_allowed_i and torch.argmax(predictions[imax])!=label_nr:
         imax -= 1
     if imax < min_allowed_i:
-        best_score = 0
+        if not fallback_to_best_scoring:
+            return None
+        best_score = -np.inf
         imax = min_allowed_i
         for i in range(min_allowed_i, len(abl_seq)):
             score = torch.softmax(predictions[i], 0)[label_nr]
             if score > best_score:
-                score = best_score
+                best_score = score
                 imax = i
-    # print("imax = %i" % imax)
     return imax
 
-def most_salient_mask_in_path( abl_seq, model, x, baseline, **kwargs ):
-    return find_class_transition(model, x, baseline, abl_seq, **kwargs)
+# This function only considers transitions from the requested class to another one.
+def find_class_transition( model, x, baseline, abl_seq, **kwargs ):
+    return most_salient_mask_in_path( abl_seq, model, x, baseline
+                                    , fallback_to_best_scoring=False
+                                    , **kwargs )
 
 def load_ablation_path_from_images(fns, size_spec=None, path_steps=None, torchdevice=None):
     if size_spec is None:
