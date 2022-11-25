@@ -285,7 +285,7 @@ class LInftyNormalizingOptStep(OptstepStrategy):
 def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , optstep
                               , label_nr=None
-                              , pointwise_scalar_product=False
+                              , pointwise_scalar_product=True
                               , gradients_postproc=lambda gs: gs
                               , range_remapping = IdentityRemapping()
                               ):
@@ -529,6 +529,10 @@ def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
                    ).detach()
                   for i in range(nSq) ]
 
+# The name of this function is somewhat misleading. It only considers
+# transitions from the requested class to another one. In the case where there
+# is no clear class transition, it picks instead the slice with the highest
+# absolute prediction for the requested class.
 def find_class_transition( model, x, baseline, abl_seq
                          , minimum_ablation_pos=0.25, label_nr=None ):
     if len(abl_seq) <= 1:
@@ -551,8 +555,11 @@ def find_class_transition( model, x, baseline, abl_seq
             if score > best_score:
                 score = best_score
                 imax = i
-    print("imax = %i" % imax)
+    # print("imax = %i" % imax)
     return imax
+
+def most_salient_mask_in_path( abl_seq, model, x, baseline, **kwargs ):
+    return find_class_transition(model, x, baseline, abl_seq, **kwargs)
 
 def load_ablation_path_from_images(fns, size_spec=None, path_steps=None, torchdevice=None):
     if size_spec is None:
