@@ -280,7 +280,7 @@ class LInftyNormalizingOptStep(OptstepStrategy):
         self.update_supremum = update_supremum
     def factor_for_update(self, update):
         norm = float(torch.max(torch.abs(update)))
-        return 1/norm
+        return self.update_supremum/norm
 
 def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , optstep
