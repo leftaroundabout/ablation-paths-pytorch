@@ -581,3 +581,16 @@ def load_ablation_path_from_images(fns, size_spec=None, path_steps=None, torchde
            [ path_candidate[int(len(path_masks)*j/path_steps)]
             for j in range(path_steps) ])
     return path_candidate
+
+
+def bordervanish_window(m):
+    if isinstance(m, torch.Tensor):
+        ys, xs = torch.meshgrid( torch.linspace(0, np.pi, m.shape[-2])
+                                                , torch.linspace(0, np.pi, m.shape[-1]) )
+        window = torch.sqrt(torch.clamp(torch.sin(xs) * torch.sin(ys), min=0, max=1)
+                                                  ).to(m.device)
+        return m * window
+    elif isinstance(m, np.ndarray):
+        return bordervanish_window(torch.tensor(m)).numpy()
+    else:
+        raise TypeError(f"Expected torch.Tensor or numpy.ndarray, got {type(m)}")
