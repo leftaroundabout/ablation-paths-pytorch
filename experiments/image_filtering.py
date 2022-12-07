@@ -22,6 +22,7 @@ import numbers
 import torch
 
 import scipy as sp
+from scipy.interpolate import interp1d
 
 import scipy.ndimage
 
@@ -51,6 +52,7 @@ def apply_brickwall_filter(image, sigma):
     return torch.real(img_ifft(spectrum * spectr_mask.to(image.device)))
 
 def apply_gaussian_filter(image, sigma):
+    assert(isinstance(sigma, numbers.Number))
     filtered = [sp.ndimage.filters.gaussian_filter(monochromatic, sigma=sigma)
                         for monochromatic in image.cpu()]
     return torch.Tensor(filtered).to(image.device)
@@ -59,6 +61,28 @@ def get_sobolev_metric(space, scale=1.):
     lap = odl.discr.diff_ops.Laplacian(space, pad_mode='order0')
     op = odl.operator.IdentityOperator(space) - scale**2 * lap
     return op
+
+def border_stretch_trafo(image, axis=None, interp_kind='cubic', undo=False):
+    if isinstance(image, torch.Tensor):
+        return torch.tensor( border_stretch_trafo (image.cpu().numpy()
+                                                 , axis=axis, interp_kind=interp_kind, undo=undo )
+                           , dtype=image.dtype
+                           ).to(image.device)
+    if axis is None:
+        for i in range(len(image.shape)):
+            image = border_stretch_trafo(image, axis=i, interp_kind=interp_kind, undo=undo)
+        return image
+    else:
+        xs = np.linspace(-np.pi/2, np.pi/2, image.shape[axis], dtype=image.dtype)
+        xs_remapped = np.sin(xs)*np.pi/2
+        if undo:
+            xs, xs_remapped = xs_remapped, xs
+        return interp1d(xs, image, kind=interp_kind, axis=axis)(xs_remapped)
+
+def apply_borderstretched_gaussian_filter(image, sigma):
+    return border_stretch_trafo(apply_gaussian_filter( border_stretch_trafo(image)
+                                                     , sigma=sigma
+                                                     ), undo=True )
 
 def apply_sobolevdualproj_filter(image, scale):
     if type(image) is odl.DiscretizedSpaceElement:
@@ -86,11 +110,13 @@ def apply_sobolevdualproj_filter(image, scale):
 class FilterType(Enum):
     Gaussian=0
     Brickwall=1
+    BorderStretched_Gaussian=2
 
 class FilteringConfig:
     def __init__(self, filter_type, sigma):
         self.filter_type = filter_type
-        self.sigma = sigma
+        self.sigma = ( sigma.sigma if isinstance(sigma, FilteringConfig)
+                         else sigma )
     def __mul__(self, other):
         assert(isinstance(other, numbers.Number))
         return FilteringConfig(self.filter_type, self.sigma * other)
@@ -99,11 +125,14 @@ class FilteringConfig:
         return self.sigma > other
 
 def apply_filter(image, ftr_conf=6):
-    if type(ftr_conf) is not FilteringConfig:
+    if not isinstance(ftr_conf, FilteringConfig):
+        assert(isinstance(ftr_conf, numbers.Number)), f"{type(ftr_conf)}"
         ftr_conf = FilteringConfig(FilterType.Gaussian, ftr_conf)
     return {
        FilterType.Gaussian: lambda img:
           apply_gaussian_filter(img, ftr_conf.sigma)
      , FilterType.Brickwall: lambda img:
           apply_brickwall_filter(img, ftr_conf.sigma)
+     , FilterType.BorderStretched_Gaussian: lambda img:
+          apply_borderstretched_gaussian_filter(img, ftr_conf.sigma)
      }[ftr_conf.filter_type](image)
