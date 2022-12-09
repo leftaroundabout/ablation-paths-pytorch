@@ -431,6 +431,19 @@ class MaskAsHueOverlay(MaskViewOverlay):
                  , y_saturation=self.y_saturation
                  , y_prominence=self.y_prominence )
 
+class FixedSaliencyOverlay(MaskViewOverlay):
+    def __init__(self, saliency, y_saturation=0.3, y_prominence=1.0, normalize_saliency_range=True):
+        if normalize_saliency_range:
+            saliency -= torch.min(saliency)
+            saliency /= torch.max(saliency)
+        self.saliency = saliency
+        self.y_saturation=y_saturation
+        self.y_prominence=y_prominence
+    def __call__(self, y, mask):
+        return overlay_mask_as_hue( y, self.saliency
+                 , y_saturation=self.y_saturation
+                 , y_prominence=self.y_prominence )
+
 class MaskMidlevelContour(MaskViewOverlay):
     def __init__(self, contour_colour=torch.tensor([1,-1,-0.5]), contour_width=2):
         self.contour_colour=contour_colour

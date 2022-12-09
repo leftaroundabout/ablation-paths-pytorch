@@ -609,3 +609,24 @@ def standard_grad_postproc( filter_conf = FilteringConfig(FilterType.NoFilter, s
 def quick_tensor_info(t):
     return f"shape: {t.shape}, min: {torch.min(t)}, max: {torch.max(t)}"
 
+def influence_weighted_increment_saliency(
+                 abl_seq, model, x, baseline
+               , label_nr=None ):
+    assert(len(abl_seq) >= 1)
+    
+    abl_seq = torch.concat([ torch.zeros_like(abl_seq[0]).unsqueeze(0)
+                           , abl_seq
+                           , torch.ones_like(abl_seq[0]).unsqueeze(0) ])
+
+    predictions = torch.softmax(model(torch.stack(
+                     masked_interpolation( x,baseline,abl_seq ))), 1).detach()
+    print(f"{predictions.shape=}")
+    if label_nr is None:
+        label_nr = torch.argmax(predictions[0])
+
+    influences = predictions[:-1, label_nr] - predictions[1:, label_nr]
+    increments = abl_seq[1:] - abl_seq[:-1]
+    
+    # We have two differentials and one integration, so need to divide once
+    # by the size of the steps (or equivalenty, multiply once by their number)
+    return increments.shape[0] * torch.sum(influences * increments, axis=0)
