@@ -22,7 +22,7 @@ import torch
 import odl
 from monotone_paths import project_monotone_lInftymin, IntegrationOperator
 from ablation import compute_square_intensity
-from image_filtering import apply_filter
+from image_filtering import apply_filter, FilteringConfig, FilterType
 from imagenet_loading import load_single_image
 from itertools import count
 from abc import ABC, abstractmethod
@@ -594,3 +594,18 @@ def bordervanish_window(m):
         return bordervanish_window(torch.tensor(m)).numpy()
     else:
         raise TypeError(f"Expected torch.Tensor or numpy.ndarray, got {type(m)}")
+
+def standard_grad_postproc( filter_conf = FilteringConfig(FilterType.NoFilter, sigma=0)
+                          , suppress_borders = False
+                          , remove_const_bias = True ):
+    def gpp(g):
+        if suppress_borders:
+            g = bordervanish_window(g)
+        if remove_const_bias:
+            g -= torch.mean(g, dim=(-2,-1), keepdim=True)
+        return apply_filter(g, filter_conf)
+    return gpp
+
+def quick_tensor_info(t):
+    return f"shape: {t.shape}, min: {torch.min(t)}, max: {torch.max(t)}"
+
