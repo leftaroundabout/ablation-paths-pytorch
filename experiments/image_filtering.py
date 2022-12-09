@@ -108,9 +108,10 @@ def apply_sobolevdualproj_filter(image, scale):
         raise TypeError("Supports only odl.DiscretisedSpaceElement, numpy.ndarray and torch.Tensor")
 
 class FilterType(Enum):
-    Gaussian=0
-    Brickwall=1
+    NoFilter=0
+    Gaussian=1
     BorderStretched_Gaussian=2
+    Brickwall=3
 
 class FilteringConfig:
     def __init__(self, filter_type, sigma):
@@ -129,7 +130,8 @@ def apply_filter(image, ftr_conf=6):
         assert(isinstance(ftr_conf, numbers.Number)), f"{type(ftr_conf)}"
         ftr_conf = FilteringConfig(FilterType.Gaussian, ftr_conf)
     return {
-       FilterType.Gaussian: lambda img:
+       FilterType.NoFilter: lambda img: img
+     , FilterType.Gaussian: lambda img:
           apply_gaussian_filter(img, ftr_conf.sigma)
      , FilterType.Brickwall: lambda img:
           apply_brickwall_filter(img, ftr_conf.sigma)
