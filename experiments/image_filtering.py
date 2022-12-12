@@ -107,13 +107,12 @@ def apply_sobolevdualproj_filter(image, scale):
     else:
         raise TypeError("Supports only odl.DiscretisedSpaceElement, numpy.ndarray and torch.Tensor")
 
-class FilterType(Enum):
-    NoFilter=0
+class LowpassFilterType(Enum):
     Gaussian=1
     BorderStretched_Gaussian=2
     Brickwall=3
 
-class FilteringConfig:
+class LowpassFilteringConfig:
     def __init__(self, filter_type, sigma):
         self.filter_type = filter_type
         self.sigma = ( sigma.sigma if isinstance(sigma, FilteringConfig)
@@ -122,19 +121,39 @@ class FilteringConfig:
         assert(isinstance(other, numbers.Number))
         return FilteringConfig(self.filter_type, self.sigma * other)
     def __gt__(self, other):
+        raise NotImplementedError("This feature has been disabled because it was ambiguous.")
         assert(isinstance(other, numbers.Number))
         return self.sigma > other
 
+class FilteringConfig:
+    def __init__(self, filter_type=None, sigma=None, filters_pipeline=None):
+        if isinstance(filter_type, LowpassFilterType):
+            assert(isinstance(sigma, numbers.Number))
+            assert(filters_pipeline is None)
+            self.filters_pipeline = [LowpassFilteringConfig(filter_type, sigma=sigma)]
+        else:
+            assert(sigma is None)
+            assert(filter_type is None)
+            if filters_pipeline is not None:
+                self.filters_pipeline = filters_pipeline
+            else:
+                self.filters_pipeline = []
+
 def apply_filter(image, ftr_conf=6):
-    if not isinstance(ftr_conf, FilteringConfig):
-        assert(isinstance(ftr_conf, numbers.Number)), f"{type(ftr_conf)}"
-        ftr_conf = FilteringConfig(FilterType.Gaussian, ftr_conf)
-    return {
-       FilterType.NoFilter: lambda img: img
-     , FilterType.Gaussian: lambda img:
+    if isinstance(ftr_conf, LowpassFilteringConfig):
+        return {
+       LowpassFilterType.Gaussian: lambda img:
           apply_gaussian_filter(img, ftr_conf.sigma)
-     , FilterType.Brickwall: lambda img:
+     , LowpassFilterType.Brickwall: lambda img:
           apply_brickwall_filter(img, ftr_conf.sigma)
-     , FilterType.BorderStretched_Gaussian: lambda img:
+     , LowpassFilterType.BorderStretched_Gaussian: lambda img:
           apply_borderstretched_gaussian_filter(img, ftr_conf.sigma)
      }[ftr_conf.filter_type](image)
+    elif isinstance(ftr_conf, FilteringConfig):
+        for iftr in ftr_conf.filters_pipeline:
+            image = apply_filter(image, iftr)
+        return image
+    else:
+        assert(isinstance(ftr_conf, numbers.Number)), f"{type(ftr_conf)}"
+        return apply_filter(image
+                , ftr_conf = FilteringConfig(LowpassFilterType.Gaussian, ftr_conf) )
