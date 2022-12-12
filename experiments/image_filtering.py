@@ -126,12 +126,25 @@ class LowpassFilteringConfig(AbstractFilteringConfig):
         assert(isinstance(scl_factor, numbers.Number))
         return FilteringConfig(self.filter_type, self.sigma * scl_factor)
 
+class SymmetrizingFilterType(Enum):
+    TimeRev_Is_OppositeMask=1
+    TimeRev_Is_Negative=2
+
+class SymmetrizeFilteringConfig(AbstractFilteringConfig):
+    def __init__(self, filter_type):
+        self.filter_type = filter_type
+    def rescaled(self, _):
+        return self
+
 class FilteringConfig(AbstractFilteringConfig):
     def __init__(self, filter_type=None, sigma=None, filters_pipeline=None):
         if isinstance(filter_type, LowpassFilterType):
             assert(isinstance(sigma, numbers.Number))
             assert(filters_pipeline is None)
             self.filters_pipeline = [LowpassFilteringConfig(filter_type, sigma=sigma)]
+        elif isinstance(filter_type, SymmetrizingFilterType):
+            assert(sigma is None)
+            self.filters_pipeline = [SymmetrizeFilteringConfig(filter_type)]
         else:
             assert(sigma is None)
             assert(filter_type is None)
@@ -154,6 +167,13 @@ def apply_filter(image, ftr_conf=6):
           apply_brickwall_filter(img, ftr_conf.sigma)
      , LowpassFilterType.BorderStretched_Gaussian: lambda img:
           apply_borderstretched_gaussian_filter(img, ftr_conf.sigma)
+     }[ftr_conf.filter_type](image)
+    elif isinstance(ftr_conf, SymmetrizeFilteringConfig):
+        return {
+       SymmetrizingFilterType.TimeRev_Is_OppositeMask: lambda imgs:
+          (imgs + 1 - torch.flip(imgs, dims=((-3,)))) / 2
+     , SymmetrizingFilterType.TimeRev_Is_Negative: lambda imgs:
+          (imgs - torch.flip(imgs, dims=((-3,)))) / 2
      }[ftr_conf.filter_type](image)
     elif isinstance(ftr_conf, FilteringConfig):
         for iftr in ftr_conf.filters_pipeline:
