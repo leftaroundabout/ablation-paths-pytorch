@@ -30,6 +30,7 @@ import torch.fft
 
 import odl
 
+from abc import ABC
 from enum import Enum
 
 def img_fft(image):
@@ -107,25 +108,25 @@ def apply_sobolevdualproj_filter(image, scale):
     else:
         raise TypeError("Supports only odl.DiscretisedSpaceElement, numpy.ndarray and torch.Tensor")
 
+class AbstractFilteringConfig(ABC):
+    def rescaled(scl_factor):
+        return NotImplemented
+
 class LowpassFilterType(Enum):
     Gaussian=1
     BorderStretched_Gaussian=2
     Brickwall=3
 
-class LowpassFilteringConfig:
+class LowpassFilteringConfig(AbstractFilteringConfig):
     def __init__(self, filter_type, sigma):
         self.filter_type = filter_type
         self.sigma = ( sigma.sigma if isinstance(sigma, FilteringConfig)
                          else sigma )
-    def __mul__(self, other):
-        assert(isinstance(other, numbers.Number))
-        return FilteringConfig(self.filter_type, self.sigma * other)
-    def __gt__(self, other):
-        raise NotImplementedError("This feature has been disabled because it was ambiguous.")
-        assert(isinstance(other, numbers.Number))
-        return self.sigma > other
+    def rescaled(self, scl_factor):
+        assert(isinstance(scl_factor, numbers.Number))
+        return FilteringConfig(self.filter_type, self.sigma * scl_factor)
 
-class FilteringConfig:
+class FilteringConfig(AbstractFilteringConfig):
     def __init__(self, filter_type=None, sigma=None, filters_pipeline=None):
         if isinstance(filter_type, LowpassFilterType):
             assert(isinstance(sigma, numbers.Number))
@@ -135,9 +136,14 @@ class FilteringConfig:
             assert(sigma is None)
             assert(filter_type is None)
             if filters_pipeline is not None:
+                for ftr in filters_pipeline:
+                    assert(isinstance(ftr, AbstractFilteringConfig))
                 self.filters_pipeline = filters_pipeline
             else:
                 self.filters_pipeline = []
+    def rescaled(self, scl_factor):
+        return FilteringConfig(filters_pipeline
+                  = [ftr.rescaled(scl_factor) for ftr in self.filters_pipeline])
 
 def apply_filter(image, ftr_conf=6):
     if isinstance(ftr_conf, LowpassFilteringConfig):

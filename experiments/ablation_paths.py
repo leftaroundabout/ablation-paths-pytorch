@@ -402,7 +402,7 @@ def saturated_masks(φ, saturation):
 
 def path_optimisation_sequence (
           model, x, baselines, path_steps, optstep
-        , saturation=0, filter_cfg=0, filter_mix_ratio=1
+        , saturation=0, filter_cfg=None, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
         , momentum_inertia=0
@@ -433,10 +433,11 @@ def path_optimisation_sequence (
                 w, h = x.shape[1:]
                 scale_factor = np.sqrt(wMask*hMask/(w*h))
             nonlocal pth
-            pth = pth*(1-filter_mix_ratio) + apply_filter(pth, σ*scale_factor)*filter_mix_ratio
+            pth = ( pth*(1-filter_mix_ratio)
+                   + apply_filter(pth, σ.rescaled(scale_factor))*filter_mix_ratio )
         if callable(filter_cfg):
             filterWith(filter_cfg(i))
-        elif filter_cfg>0:
+        elif filter_cfg is not None:
             filterWith(filter_cfg)
         pth = pathrepairer(pth)
         if momentum_inertia>0:
