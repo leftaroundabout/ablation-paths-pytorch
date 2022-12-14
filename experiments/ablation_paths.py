@@ -26,6 +26,7 @@ from image_filtering import apply_filter, FilteringConfig, LowpassFilterType
 from imagenet_loading import load_single_image
 from itertools import count
 from abc import ABC, abstractmethod
+from enum import Enum
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -282,8 +283,14 @@ class LInftyNormalizingOptStep(OptstepStrategy):
         norm = float(torch.max(torch.abs(update)))
         return self.update_supremum/norm
 
+class AblPathObjective(Enum):
+    FwdLongestRetaining=0
+    BwdQuickestDissipating=1
+    FwdRetaining_BwdDissipating=2
+
 def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , optstep
+                              , objective=AblPathObjective.FwdLongestRetaining
                               , label_nr=None
                               , pointwise_scalar_product=True
                               , gradients_postproc=lambda gs: gs
@@ -303,38 +310,53 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     # auto-broadcast channel dimension) to target- and baseline images.
     resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq,1,wMask,hMask)
                                         , (wX, hX)
-                                        ).detach()
+                                        )
 
     # If given a suitable remapping function, use it for a representation
-    # of the ablation path that is not limited to the range [0,1]
+    # of the ablation path that is not limited to the range [0,1].
     delimited_abl_seq = range_remapping.from_unitinterval(resampled_abl_seq)
 
     x_opt = x.to(abl_seq.device)
     
-    def as_const_seq(y):
-        return y.unsqueeze(0).repeat((nSq,)+tuple(1 for _ in y.shape))
-
-    x_clones = as_const_seq(x_opt)
-    difference = as_const_seq(baseline.to(abl_seq.device) - x_opt)
+    difference = baseline.to(abl_seq.device) - x_opt
     
     assert(pointwise_scalar_product
       ), "Optimising without pointwise scalar product currently not supported."
 
     delimited_abl_seq.requires_grad = True
     argument = (x_opt + difference.to(abl_seq.device)
-                         * range_remapping.to_unitinterval(delimited_abl_seq)
+                         * { AblPathObjective.FwdLongestRetaining:
+                                lambda rabs: rabs
+                           , AblPathObjective.BwdQuickestDissipating:
+                                lambda rabs: 1-rabs
+                           , AblPathObjective.FwdRetaining_BwdDissipating:
+                                lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
+                           }[objective]
+                            (range_remapping.to_unitinterval(delimited_abl_seq))
                    )
+
+    n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
+                           else nSq )
+    n_negative_weighted = ( 0 if objective is AblPathObjective.FwdLongestRetaining
+                           else nSq )
     
     # Ablation path score, computed as the "integral": average of the
-    # target-class probability over the path.
-    intg_score = torch.mean(torch.softmax(model(argument)[:,:,0,0], -1)[:, label_nr])
+    # target-class probability over the path. Backward-dissipating contributions
+    # are weighed negatively.
+    intg_score = torch.mean(
+                    torch.softmax(model(argument)[:,:,0,0], -1)
+                                       [:, label_nr]
+                   * torch.tensor([1 for _ in range(n_positive_weighted)]
+                                  + [-1 for _ in range(n_negative_weighted)] )
+                          .to(abl_seq.device)
+                  ) * (2 if objective is AblPathObjective.FwdRetaining_BwdDissipating
+                        else 1)
 
     # Gradient of the integral-score, as a function of the entire mask-path;
     # in shape of its oversampled form.
     grad = torch.autograd.grad( intg_score
                               , delimited_abl_seq )[0][:,0]
-    assert(grad.shape==(nSq, wX, hX))
-    
+
     grad = gradients_postproc(grad)
 
     if optstep is None:
@@ -345,20 +367,11 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
         update = grad * optstep.factor_for_update(grad)
     assert(update.shape==(nSq, wX, hX))
     
-    def print_range(info, t):
-        print(f"{info}=({float(torch.min(t))}, {float(torch.max(t))})")
-
-    # print_range("old_range", abl_seq)
-    # print_range("delimited_range", delimited_abl_seq)
-
-    delimited_abl_seq = delimited_abl_seq[:,0] + update
-
-    resampled_abl_seq = range_remapping.to_unitinterval(delimited_abl_seq
+    resampled_abl_seq = range_remapping.to_unitinterval(
+                delimited_abl_seq[:,0] + update
                            ).detach()
 
     abl_seq[:] = resample_to_reso(resampled_abl_seq, (wMask, hMask))
-
-    # print_range("new_range", abl_seq)
 
     return float(intg_score)
 
@@ -621,7 +634,7 @@ def influence_weighted_increment_saliency(
 
     predictions = torch.softmax(model(torch.stack(
                      masked_interpolation( x,baseline,abl_seq ))), 1).detach()
-    print(f"{predictions.shape=}")
+    
     if label_nr is None:
         label_nr = torch.argmax(predictions[0])
 
