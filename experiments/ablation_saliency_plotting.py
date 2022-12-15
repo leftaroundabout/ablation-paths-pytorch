@@ -33,7 +33,10 @@ import hvplot.pandas
 
 # from monotone_paths import project_monotone_lInftymin
 # from ablation import compute_square_intensity
-from ablation_paths import masked_interpolation, find_class_transition, resample_to_reso
+from ablation_paths import ( masked_interpolation
+                           , find_class_transition
+                           , resample_to_reso
+                           , AblPathObjective )
 from image_filtering import apply_gaussian_filter
 
 def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
@@ -42,12 +45,13 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , extras={}
                         , pretty_method_names={}
                         , classification_name=None
-                        , include_endpoints=True ):
+                        , include_endpoints=True
+                        , objective=AblPathObjective.FwdLongestRetaining ):
     if callable(baselines):
         baseline_samples = [ baselines()
                               for i in range(12) ]
     else:
-        baselines_samples = [baselines]
+        baseline_samples = baselines
     if classification_name is None:
         if type(model) is TrainedTimmModel:
             classification_name = model.timm_model_name
@@ -63,18 +67,23 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
         label_nr = classif_top_label
 
     def relevant_predictions():
-        complete_classif = {method: [ torch.softmax(model(torch.stack(
-                                        masked_interpolation( x, baseline, abl_seq
-                                                            , include_endpoints=include_endpoints ))
+        complete_classif, contrast_classif = [
+                   {method: [ torch.softmax(model(torch.stack(
+                                 masked_interpolation( x, baseline, co(abl_seq)
+                                                     , include_endpoints=include_endpoints ))
                                             ), dim=1).detach()
                                      for baseline in baseline_samples ]
                               for method, abl_seq in abl_series }
-        return { vis_class:
+                 for co in [lambda abls: abls, lambda abls: 1-abls] ]
+        return {**{ vis_class:
                   { method: [ cl[:,label_acc] for cl in cls ]
                    for method, cls in complete_classif.items() }
                 for vis_class, label_acc in [('focused', label_nr)
                                             ,('top', classif_top_label)]
                  if classif_top_label!=label_nr or vis_class=='focused' }
+               , 'contrast': { method: [ cl[:,label_nr] for cl in cls ]
+                   for method, cls in contrast_classif.items() }
+               }
     all_predictions = relevant_predictions()
 
     def as_domain(method, sampleid):
@@ -89,17 +98,24 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                            for j in range(0, predictions[0].shape[0])])
             for fdescr, f in (
                   [('median', np.median), ('min', np.min), ('max', np.max)]
-                   if vis_class=='focused' else [('median', np.median)] )
+                   if vis_class in ['focused', 'contrast']
+                          else [('median', np.median)] )
          }
          for method, predictions in rel_predicts.items() }
       for vis_class, rel_predicts in all_predictions.items() }
 
     for i, (method, abl_seq) in enumerate(abl_series):
         predictions = all_predictions['focused'][method]
-        sf = axs[i] if len(abl_series)>1 or tgt_subplots is not None else axs
+        contrasts = all_predictions['contrast'][method]
+        sf = axs[i] if tgt_subplots is not None else axs[i][0]
         for stat_d in ['median', 'min', 'max']:
             sf.fill_between( as_domain(method,0)
-                           , predictions_stats['focused'][method][stat_d]
+                           , predictions_stats['contrast'][method][stat_d]
+                            if objective is AblPathObjective.BwdQuickestDissipating
+                            else predictions_stats['focused'][method][stat_d]
+                           , predictions_stats['contrast'][method][stat_d]
+                            if objective is AblPathObjective.FwdRetaining_BwdDissipating
+                            else 0
                            , alpha=0.1
                            , color = (0,0.3,0.5,1) )
         for method_c, _ in abl_series:
@@ -115,9 +131,13 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
             extras[method](sf)
         def trapez(t):
             return torch.mean(torch.cat([(t[0:1]+t[-1:])/2, t[1:-1]]))
-        this_score = ( torch.mean(torch.stack([trapez(p) for p in predictions]))
+        goodnesses = [ predictions[j] if objective is AblPathObjective.FwdLongestRetaining
+                       else contrasts[j] if objective is AblPathObjective.BwdQuickestDissipating
+                       else predictions[j]-contrasts[j]
+                      for j in range(len(predictions)) ]
+        this_score = ( torch.mean(torch.stack([trapez(g) for g in goodnesses]))
                                           if include_endpoints
-                                          else torch.mean(torch.stack(predictions)) )
+                                          else torch.mean(torch.stack(goodnesses)) )
         if label_name is None and labels is not None:
             label_name = labels[label_nr]
         score_descr = ( "%s → %s" % (classification_name, label_name)
@@ -289,7 +309,7 @@ def mpplotgrid_for_maskcombos( n_abl_seqs, n_imgviews, n_columns=1
     else:
         n_sidecells = n_imgviews+1
         fig,axsg = plt.subplots( n_abl_seqs_per_column, n_sidecells*n_columns, squeeze=False
-                               , figsize=((4+2*n_imgviews)*n_columns, 2*(n_abl_seqs+extra_rows))
+                               , figsize=((4+2*n_imgviews)*n_columns, 2*(n_abl_seqs+n_extra_rows))
                                , gridspec_kw={'width_ratios': ([2.5] + [1 for _ in range (n_imgviews)])
                                                                * n_columns } )
         axs = np.asarray([ [axsg[j//n_columns, (j%n_columns)*n_sidecells + x]
