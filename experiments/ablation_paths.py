@@ -37,8 +37,7 @@ def all_indices(t):
 
 def monotonise_ablationpath(abl_seq):
     if type(abl_seq) is torch.Tensor:
-        # This should be generalised to work with any tensor shape,
-        # not just two spatial dimensions
+        assert(len(abl_seq.shape)>1), f"{abl_seq.shape=}"
         for ij in all_indices(abl_seq[0]):
             slicesel = (slice(None), *ij)
             thispixel = abl_seq[slicesel].cpu().numpy()
@@ -172,12 +171,12 @@ def repair_ablation_path_convexOpt( φ, distancespace_embedding=None
         return result.asarray()
 
 def resample_to_reso(v, tgt_shape):
-    if len(v.shape) < 4:
+    if len(v.shape) < len(tgt_shape)+2:
         return resample_to_reso(v.unsqueeze(0), tgt_shape).squeeze(0)
     elif v.shape[2:] == tgt_shape:
         return v
     else:
-        assert(len(tgt_shape)==2)
+        assert(len(tgt_shape)==2), f"{v.shape=}, {tgt_shape=}"
         return torch.nn.functional.interpolate( v, size=tgt_shape
                                               , mode='bilinear', align_corners=False )
         
@@ -299,11 +298,11 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , range_remapping = IdentityRemapping()
                               ):
     nSq = abl_seq.shape[0]
-    dims_mask = abl_seq.shape[1:]
+    mask_shape = abl_seq.shape[1:]
     nCh = x.shape[0]
-    dims_x = x.shape[1:]
+    img_shape = x.shape[1:]
 
-    needs_resampling = dims_mask != dims_x
+    needs_resampling = mask_shape != img_shape
 
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
@@ -313,8 +312,8 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
 
     # Suitably reshaped and resampled version of mask, for applying (with
     # auto-broadcast channel dimension) to target- and baseline images.
-    resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq, 1, *dims_mask)
-                                        , dims_x
+    resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq, 1, *mask_shape)
+                                        , img_shape
                                         )
 
     # If given a suitable remapping function, use it for a representation
@@ -344,12 +343,17 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
                            else nSq )
     n_negative_weighted = ( 0 if objective is AblPathObjective.FwdLongestRetaining
                            else nSq )
-    
+
+    model_result = model(argument)
+    n_evals, n_classes = model_result.shape[:2]
+    assert(n_evals == n_positive_weighted+n_negative_weighted
+          ), f"{n_positive_weighted=}, {n_negative_weighted=}, {n_evals=}"
+
     # Ablation path score, computed as the "integral": average of the
     # target-class probability over the path. Backward-dissipating contributions
     # are weighed negatively.
     intg_score = torch.mean(
-                    torch.softmax(model(argument)[:,:,0,0], -1)
+                    torch.softmax(model_result.reshape(n_evals,n_classes), -1)
                                        [:, label_nr]
                    * torch.tensor([1 for _ in range(n_positive_weighted)]
                                   + [-1 for _ in range(n_negative_weighted)] )
@@ -370,19 +374,19 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
         update = grad * optstep
     elif isinstance(optstep, OptstepStrategy):
         update = grad * optstep.factor_for_update(grad)
-    assert(update.shape==(nSq, *dims_x))
+    assert(update.shape==(nSq, *img_shape))
     
     resampled_abl_seq = range_remapping.to_unitinterval(
                 delimited_abl_seq[:,0] + update
                            ).detach()
 
-    abl_seq[:] = resample_to_reso(resampled_abl_seq, dims_mask)
+    abl_seq[:] = resample_to_reso(resampled_abl_seq, mask_shape)
 
     return float(intg_score)
 
     ### OLD VERSION, taking the pointwise scalar product separately instead of
     #   as part of the to-be-optimised computation.
-    gs = torch.zeros(nSq, nCh, *dims_x).to(abl_seq.device)
+    gs = torch.zeros(nSq, nCh, *img_shape).to(abl_seq.device)
 
     # The path score, which is to be computed as an integral.
     intg = 0
@@ -397,7 +401,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
 
     gs = gradients_postproc(gs)
 
-    abl_update = torch.zeros(nSq, dims_x).to(abl_seq.device)
+    abl_update = torch.zeros(nSq, *img_shape).to(abl_seq.device)
     for i in range(nSq):
         direction = ( torch.sum(gs[i] * difference, 0)
                        if pointwise_scalar_product
@@ -408,7 +412,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
         else:
             abl_update[i] = optstep*direction
     if needs_resampling:
-        abl_seq += resample_to_reso(abl_update, dims_mask)
+        abl_seq += resample_to_reso(abl_update, mask_shape)
     else:
         abl_seq += abl_update
     return intg
@@ -424,7 +428,7 @@ def path_optimisation_sequence (
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
         , momentum_inertia=0
-        , **kwargs):
+        , **kwargs ):
     if ablmask_resolution is None:
         ablmask_resolution = x.shape[1:]
     pth = ( torch.stack([p*torch.ones(ablmask_resolution)
@@ -447,9 +451,9 @@ def path_optimisation_sequence (
             pth = saturated_masks(pth,saturation)
         def filterWith(σ):
             if ablmask_resolution is not None:
-                dims_x = x.shape[1:]
+                img_shape = x.shape[1:]
                 scale_factor = np.sqrt( np.product(ablmask_resolution)
-                                       / np.product(dims_x) )
+                                       / np.product(img_shape) )
             nonlocal pth
             pth = ( pth*(1-filter_mix_ratio)
                    + apply_filter(pth, σ.rescaled(scale_factor))*filter_mix_ratio )
@@ -532,12 +536,12 @@ def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
         abl_seq = torch.stack(list(abl_seq))
     xOpt = x.to(abl_seq.device)
     nSq = abl_seq.shape[0]
-    dims_mask = abl_seq.shape[1:]
+    mask_shape = abl_seq.shape[1:]
     nCh = x.shape[0]
-    dims_x = x.shape[1:]
+    img_shape = x.shape[1:]
 
-    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *dims_mask), dims_x
-                      ).repeat(1, nCh, *[1 for _ in dims_x])
+    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape
+                      ).repeat(1, nCh, *[1 for _ in img_shape])
 
     difference = baseline.to(abl_seq.device) - xOpt
     if include_endpoints:
