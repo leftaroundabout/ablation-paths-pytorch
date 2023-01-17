@@ -24,6 +24,7 @@ from imageclassifier_model import TrainedTimmModel
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import matplotlib.gridspec as grid
+from matplotlib.colors import to_rgb
 
 import panel as pn
 import holoviews as hv
@@ -32,7 +33,10 @@ import hvplot.pandas
 
 # from monotone_paths import project_monotone_lInftymin
 # from ablation import compute_square_intensity
-from ablation_paths import masked_interpolation, find_class_transition, resample_to_reso
+from ablation_paths import ( masked_interpolation
+                           , find_class_transition
+                           , resample_to_reso
+                           , AblPathObjective )
 from image_filtering import apply_gaussian_filter
 
 def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
@@ -41,12 +45,13 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , extras={}
                         , pretty_method_names={}
                         , classification_name=None
-                        , include_endpoints=True ):
+                        , include_endpoints=True
+                        , objective=AblPathObjective.FwdLongestRetaining ):
     if callable(baselines):
         baseline_samples = [ baselines()
                               for i in range(12) ]
     else:
-        baselines_samples = [baselines]
+        baseline_samples = baselines
     if classification_name is None:
         if type(model) is TrainedTimmModel:
             classification_name = model.timm_model_name
@@ -62,18 +67,23 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
         label_nr = classif_top_label
 
     def relevant_predictions():
-        complete_classif = {method: [ torch.softmax(model(torch.stack(
-                                        masked_interpolation( x, baseline, abl_seq
-                                                            , include_endpoints=include_endpoints ))
+        complete_classif, contrast_classif = [
+                   {method: [ torch.softmax(model(torch.stack(
+                                 masked_interpolation( x, baseline, co(abl_seq)
+                                                     , include_endpoints=include_endpoints ))
                                             ), dim=1).detach()
                                      for baseline in baseline_samples ]
                               for method, abl_seq in abl_series }
-        return { vis_class:
+                 for co in [lambda abls: abls, lambda abls: 1-abls] ]
+        return {**{ vis_class:
                   { method: [ cl[:,label_acc] for cl in cls ]
                    for method, cls in complete_classif.items() }
                 for vis_class, label_acc in [('focused', label_nr)
                                             ,('top', classif_top_label)]
                  if classif_top_label!=label_nr or vis_class=='focused' }
+               , 'contrast': { method: [ cl[:,label_nr] for cl in cls ]
+                   for method, cls in contrast_classif.items() }
+               }
     all_predictions = relevant_predictions()
 
     def as_domain(method, sampleid):
@@ -88,17 +98,24 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                            for j in range(0, predictions[0].shape[0])])
             for fdescr, f in (
                   [('median', np.median), ('min', np.min), ('max', np.max)]
-                   if vis_class=='focused' else [('median', np.median)] )
+                   if vis_class in ['focused', 'contrast']
+                          else [('median', np.median)] )
          }
          for method, predictions in rel_predicts.items() }
       for vis_class, rel_predicts in all_predictions.items() }
 
     for i, (method, abl_seq) in enumerate(abl_series):
         predictions = all_predictions['focused'][method]
-        sf = axs[i] if len(abl_series)>1 or tgt_subplots is not None else axs
+        contrasts = all_predictions['contrast'][method]
+        sf = axs[i] if tgt_subplots is not None else axs[i][0]
         for stat_d in ['median', 'min', 'max']:
             sf.fill_between( as_domain(method,0)
-                           , predictions_stats['focused'][method][stat_d]
+                           , predictions_stats['contrast'][method][stat_d]
+                            if objective is AblPathObjective.BwdQuickestDissipating
+                            else predictions_stats['focused'][method][stat_d]
+                           , predictions_stats['contrast'][method][stat_d]
+                            if objective is AblPathObjective.FwdRetaining_BwdDissipating
+                            else 0
                            , alpha=0.1
                            , color = (0,0.3,0.5,1) )
         for method_c, _ in abl_series:
@@ -114,9 +131,13 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
             extras[method](sf)
         def trapez(t):
             return torch.mean(torch.cat([(t[0:1]+t[-1:])/2, t[1:-1]]))
-        this_score = ( torch.mean(torch.stack([trapez(p) for p in predictions]))
+        goodnesses = [ predictions[j] if objective is AblPathObjective.FwdLongestRetaining
+                       else contrasts[j] if objective is AblPathObjective.BwdQuickestDissipating
+                       else predictions[j]-contrasts[j]
+                      for j in range(len(predictions)) ]
+        this_score = ( torch.mean(torch.stack([trapez(g) for g in goodnesses]))
                                           if include_endpoints
-                                          else torch.mean(torch.stack(predictions)) )
+                                          else torch.mean(torch.stack(goodnesses)) )
         if label_name is None and labels is not None:
             label_name = labels[label_nr]
         score_descr = ( "%s → %s" % (classification_name, label_name)
@@ -232,6 +253,27 @@ def overlay_mask_deemphasizeirrelevant(
                      + outside_brightness
               , mask.unsqueeze(0) )[0] )
 
+def overlay_mask_argmin(
+                y, mask
+              , crosshair_radius=5
+              , crosshair_colour='red' ):
+    crosshair_colour = to_rgb(crosshair_colour)
+    iys, ixs = torch.meshgrid([torch.arange(n) for n in y.shape[1:]])
+    iys_mask, ixs_mask = torch.meshgrid([
+          torch.tensor(np.linspace(0, y.shape[j+1], mask.shape[j], endpoint=False))
+        for j in [0,1] ])
+    iflat_am = torch.argmin(mask)
+    iy_am = round(float(iys_mask.flatten()[iflat_am]))
+    ix_am = round(float(ixs_mask.flatten()[iflat_am]))
+    ch_hori = (ixs==ix_am) & (iys >= iy_am-crosshair_radius
+                         ) & (iys <= iy_am+crosshair_radius)
+    ch_vert = (iys==iy_am) & (ixs >= ix_am-crosshair_radius
+                         ) & (ixs <= ix_am+crosshair_radius)
+    for j in range(y.shape[0]):
+        y[j][ch_hori | ch_vert] = crosshair_colour[j]*2 - 1
+    
+    return y
+
 default_mask_combo_img_views = ['target_masked', 'interpolation_result', 'baseline_antimasked']
 
 def mpplotgrid_score_below_image( n_abl_seqs, n_imgviews, n_columns=1, n_extra_rows=0
@@ -267,7 +309,7 @@ def mpplotgrid_for_maskcombos( n_abl_seqs, n_imgviews, n_columns=1
     else:
         n_sidecells = n_imgviews+1
         fig,axsg = plt.subplots( n_abl_seqs_per_column, n_sidecells*n_columns, squeeze=False
-                               , figsize=((4+2*n_imgviews)*n_columns, 2*(n_abl_seqs+extra_rows))
+                               , figsize=((4+2*n_imgviews)*n_columns, 2*(n_abl_seqs+n_extra_rows))
                                , gridspec_kw={'width_ratios': ([2.5] + [1 for _ in range (n_imgviews)])
                                                                * n_columns } )
         axs = np.asarray([ [axsg[j//n_columns, (j%n_columns)*n_sidecells + x]
@@ -362,6 +404,8 @@ def show_histogram( df, name='im0', width=400, height=400
                                   , xformatter=label_fmt
                                   , width=width, height=height, ylim=(0,1) )
                     , **kwargs ) )
+def classification_histogram( model, x, labels, name='im0', **kwargs ):
+    return show_histogram(get_dataframe(model(x), labels=labels), **kwargs)
 
 # Irritatingly, HoloViews' + operator only forms a semigroup, not monoid,
 # so concatenating a variable number of plot objects requires this
@@ -407,6 +451,19 @@ class MaskAsHueOverlay(MaskViewOverlay):
                  , y_saturation=self.y_saturation
                  , y_prominence=self.y_prominence )
 
+class FixedSaliencyOverlay(MaskViewOverlay):
+    def __init__(self, saliency, y_saturation=0.3, y_prominence=1.0, normalize_saliency_range=True):
+        if normalize_saliency_range:
+            saliency -= torch.min(saliency)
+            saliency /= torch.max(saliency)
+        self.saliency = saliency
+        self.y_saturation=y_saturation
+        self.y_prominence=y_prominence
+    def __call__(self, y, mask):
+        return overlay_mask_as_hue( y, self.saliency
+                 , y_saturation=self.y_saturation
+                 , y_prominence=self.y_prominence )
+
 class MaskMidlevelContour(MaskViewOverlay):
     def __init__(self, contour_colour=torch.tensor([1,-1,-0.5]), contour_width=2):
         self.contour_colour=contour_colour
@@ -415,6 +472,16 @@ class MaskMidlevelContour(MaskViewOverlay):
         return overlay_mask_contours( y, mask
            , contour_colour=self.contour_colour
            , contour_width=self.contour_width )
+
+class MaskArgminOverlay(MaskViewOverlay):
+    def __init__(self, crosshair_radius=5, crosshair_colour='red' ):
+        self.crosshair_radius=crosshair_radius
+        self.crosshair_colour=crosshair_colour
+    def __call__(self, y, mask):
+        return overlay_mask_argmin(
+                y, mask
+              , crosshair_radius=self.crosshair_radius
+              , crosshair_colour=self.crosshair_colour )
 
 class OverlayWithFullySaturatedMask(MaskViewOverlay):
     def __init__(self, overlay_method):
@@ -457,13 +524,20 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                          , view_scoregraph=False
                          , add_overlay_mask_contours=False
                          , add_overlay_mask_as_hue=False
+                         , image_valrange=(-1,1)
                          , focused_labels=[]
+                         , objective_class=None
                          , viewers_size=auto, classification_name=None, **kwargs ):
+    n_ablseq = abl_seq.shape[0]
+    def to_unit_range(y):
+        return (2*y - image_valrange[0] - image_valrange[1]
+               ) / (image_valrange[1] - image_valrange[0])
     torchdevice = x.device if x is not None else None
     if classification_name is None:
         if type(model) is TrainedTimmModel:
             classification_name = model.timm_model_name
-    inter_select = pn.widgets.IntSlider(start=0, end=len(abl_seq)+2)
+    inter_select = pn.widgets.IntSlider(start=0, end=n_ablseq+1)
+    complement_select = pn.widgets.Checkbox(name='Complement masks')
     if view_interpolation is auto:
         view_interpolation = (x is not None) and (baseline is not None)
     if view_classification is auto:
@@ -478,23 +552,27 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
     hvopts_classif = hvopts_general.copy()
     if classification_name is not None:
         hvopts_classif['name'] = classification_name
-    abl_seq_wEndpoints = torch.cat( [ torch.zeros_like(abl_seq[0:1])
-                                    , abl_seq
-                                    , torch.ones_like(abl_seq[0:1]) ] )
+    abl_seq_wEndpoints = torch.cat(
+                          [ ooc(torch.cat( [ torch.zeros_like(abl_seq[0:1])
+                                           , abl_seq
+                                           , torch.ones_like(abl_seq[0:1]) ] ))
+                           for ooc in [lambda abls: abls, lambda abls: 1-abls] ] )
+    n_tested = abl_seq_wEndpoints.shape[0]
     interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
+    interpol_seq_normrng = [to_unit_range(i) for i in interpol_seq]
     if add_overlay_mask_as_hue:
         interpol_seq_maskhint = [ overlay_mask_as_hue
-                                           ( interpol_seq[i], abl_seq_wEndpoints[i] )
-                                   for i in range(len(abl_seq)+2) ]
+                                           ( interpol_seq_normrng[i], abl_seq_wEndpoints[i] )
+                                   for i in range(n_tested) ]
     else:
-        interpol_seq_maskhint = interpol_seq
+        interpol_seq_maskhint = interpol_seq_normrng
     if view_x is True:
-        x_view_seq = [ x for i in range(len(abl_seq)+2) ]
+        x_view_seq = [ x for i in range(n_tested) ]
         do_x_view = True
     elif isinstance(view_x, MaskViewOverlay):
-        x_view_seq = [ view_x( x, abl_seq_wEndpoints[i] )
-                                   for i in range(len(abl_seq)+2) ]
+        x_view_seq = [ view_x( to_unit_range(x), abl_seq_wEndpoints[i] )
+                                   for i in range(n_tested) ]
         do_x_view = True
     else:
         do_x_view = False
@@ -502,57 +580,83 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
         interpol_seq_contours = [ overlay_mask_contours
                                            ( interpol_seq_maskhint[i], abl_seq_wEndpoints[i]
                                            , contour_colour=torch.tensor([1,-1,-0.5]) )
-                                   for i in range(len(abl_seq)+2) ]
+                                   for i in range(n_tested) ]
         interpol_seq_maskhint = interpol_seq_contours
     if view_classification or view_scoregraph:
         classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
+        clshape = classifications.shape
+        classifications = classifications.reshape(n_tested, clshape[1])
     if view_scoregraph:
-        masses = np.array([float(torch.mean(abl_seq_wEndpoints[i]))
-                             for i in range(len(abl_seq)+2)])
+        n_scoregraph = 128
+        masses_od = np.array([float(torch.mean(abl_seq_wEndpoints[i]))
+                               for i in range(n_ablseq+2)])
+        masses = np.linspace(0,1,n_scoregraph)
         top_class = int(torch.argmax(classifications[0]))
-        topclass_probs = torch.softmax(classifications, dim=1)[:,top_class].cpu().numpy()
-    def show_intermediate(i, enable_scoregraph=True, enable_others=True):
-        intensity = abl_seq_wEndpoints[i].cpu().numpy()
+        if objective_class is None:
+            objective_class = top_class
+        objective_class_probs_all = torch.softmax(classifications, dim=1
+                                      )[:,objective_class].cpu().numpy()
+        objective_class_probs_opt = np.interp(masses, masses_od
+                  , objective_class_probs_all[:n_ablseq+2] )
+        objective_class_probs_pess = np.interp(masses, masses_od
+                  , objective_class_probs_all[n_ablseq+2:] )
+    def hvRGB(y):
+        return hv.RGB((y.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
+                      ).opts(**hvopts_img)
+    def show_intermediate( complement, i
+                         , enable_scoregraph=True, enable_others=True ):
+        c = n_ablseq+2 if complement else 0
+        intensity = abl_seq_wEndpoints[c+i].cpu().numpy()
         views = []
         if do_x_view:
-            xview_img = x_view_seq[i]
-            xview = hv.RGB((xview_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
-                              ).opts(**hvopts_img)
+            xview_img = x_view_seq[c+i]
+            xview = hvRGB(xview_img)
             views = views + [xview]
         if view_masks and enable_others:
             maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
         if view_interpolation and enable_others:
-            interpol_img = interpol_seq_maskhint[i]
-            interpolview = hv.RGB((interpol_img.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
-                              ).opts(**hvopts_img)
+            interpol_img = interpol_seq_maskhint[c+i]
+            interpolview = hvRGB(interpol_img)
             views = views + [interpolview]
         if view_classification and enable_others:
             dfopts = {} if classification_name is None else {
                              'namer': lambda _: classification_name}
-            classifview = show_histogram( get_dataframe(classifications[i:i+1], labels, **dfopts)
+            classifview = show_histogram( get_dataframe(classifications[c+i : c+i+1], labels, **dfopts)
                                            , guaranteed_labels=focused_labels, **hvopts_classif )
             views = views + [classifview]
         if view_scoregraph and enable_scoregraph:
             sgv_opts = { 'width': viewers_size*sum([view_masks, view_interpolation, view_classification])
                        , 'height': viewers_size//2
                        , 'xlim':(0,1), 'ylim':(0,1)
-                       , 'xlabel':'t', 'ylabel':'classif←%s'%labels[top_class]
+                       , 'xlabel':'t', 'ylabel':'classif←%s'%labels[objective_class]
                        , 'axiswise':True }
-            scoregraphview = ( hv.Area((masses, topclass_probs))
-                                .opts(**sgv_opts)
-                             * hv.Curve(([masses[i],masses[i]], [0,1]))
+            scoregraphview = ( hv.Area(( masses
+                                       , objective_class_probs_opt
+                                       , np.minimum(
+                                            objective_class_probs_opt
+                                          , objective_class_probs_pess ) )
+                                      , vdims=['yopt', 'ypess'] )
+                                .opts(fill_alpha=0.3, **sgv_opts)
+                             * hv.Curve((masses
+                                          , objective_class_probs_pess
+                                           if complement
+                                           else objective_class_probs_opt))
+                                .opts(color='blue', **sgv_opts)
+                             * hv.Curve(([masses_od[i],masses_od[i]], [0,1]))
                                 .opts(color='black', **sgv_opts)
                              ).opts(**sgv_opts)
             views = views + [scoregraphview]
 
         return views
     if view_scoregraph:
-        return pn.Column( inter_select
-                        , pn.depends(inter_select.param.value)
-                                    (lambda i: hv.Layout(show_intermediate(i, enable_scoregraph=False)))
-                        , pn.depends(inter_select.param.value)
-                                    (lambda i: hv.Layout(show_intermediate(i, enable_others=False)))
+        return pn.Column( pn.Row(complement_select, inter_select)
+                        , pn.depends(complement_select.param.value, inter_select.param.value)
+                                    (lambda cp,i: hv.Layout(show_intermediate(
+                                                      cp, i, enable_scoregraph=False)))
+                        , pn.depends(complement_select.param.value, inter_select.param.value)
+                                    (lambda cp,i: hv.Layout(show_intermediate(
+                                                      cp, i, enable_others=False)))
                         )
     else:
         return pn.Column( inter_select

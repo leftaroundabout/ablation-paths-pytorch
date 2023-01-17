@@ -22,6 +22,7 @@ import numbers
 import torch
 
 import scipy as sp
+from scipy.interpolate import interp1d
 
 import scipy.ndimage
 
@@ -29,6 +30,7 @@ import torch.fft
 
 import odl
 
+from abc import ABC
 from enum import Enum
 
 def img_fft(image):
@@ -51,6 +53,7 @@ def apply_brickwall_filter(image, sigma):
     return torch.real(img_ifft(spectrum * spectr_mask.to(image.device)))
 
 def apply_gaussian_filter(image, sigma):
+    assert(isinstance(sigma, numbers.Number))
     filtered = [sp.ndimage.filters.gaussian_filter(monochromatic, sigma=sigma)
                         for monochromatic in image.cpu()]
     return torch.Tensor(filtered).to(image.device)
@@ -59,6 +62,28 @@ def get_sobolev_metric(space, scale=1.):
     lap = odl.discr.diff_ops.Laplacian(space, pad_mode='order0')
     op = odl.operator.IdentityOperator(space) - scale**2 * lap
     return op
+
+def border_stretch_trafo(image, axis=None, interp_kind='cubic', undo=False):
+    if isinstance(image, torch.Tensor):
+        return torch.tensor( border_stretch_trafo (image.cpu().numpy()
+                                                 , axis=axis, interp_kind=interp_kind, undo=undo )
+                           , dtype=image.dtype
+                           ).to(image.device)
+    if axis is None:
+        for i in range(len(image.shape)):
+            image = border_stretch_trafo(image, axis=i, interp_kind=interp_kind, undo=undo)
+        return image
+    else:
+        xs = np.linspace(-np.pi/2, np.pi/2, image.shape[axis], dtype=image.dtype)
+        xs_remapped = np.sin(xs)*np.pi/2
+        if undo:
+            xs, xs_remapped = xs_remapped, xs
+        return interp1d(xs, image, kind=interp_kind, axis=axis)(xs_remapped)
+
+def apply_borderstretched_gaussian_filter(image, sigma):
+    return border_stretch_trafo(apply_gaussian_filter( border_stretch_trafo(image)
+                                                     , sigma=sigma
+                                                     ), undo=True )
 
 def apply_sobolevdualproj_filter(image, scale):
     if type(image) is odl.DiscretizedSpaceElement:
@@ -83,27 +108,78 @@ def apply_sobolevdualproj_filter(image, scale):
     else:
         raise TypeError("Supports only odl.DiscretisedSpaceElement, numpy.ndarray and torch.Tensor")
 
-class FilterType(Enum):
-    Gaussian=0
-    Brickwall=1
+class AbstractFilteringConfig(ABC):
+    def rescaled(scl_factor):
+        return NotImplemented
 
-class FilteringConfig:
+class LowpassFilterType(Enum):
+    Gaussian=1
+    BorderStretched_Gaussian=2
+    Brickwall=3
+
+class LowpassFilteringConfig(AbstractFilteringConfig):
     def __init__(self, filter_type, sigma):
         self.filter_type = filter_type
-        self.sigma = sigma
-    def __mul__(self, other):
-        assert(isinstance(other, numbers.Number))
-        return FilteringConfig(self.filter_type, self.sigma * other)
-    def __gt__(self, other):
-        assert(isinstance(other, numbers.Number))
-        return self.sigma > other
+        self.sigma = ( sigma.sigma if isinstance(sigma, FilteringConfig)
+                         else sigma )
+    def rescaled(self, scl_factor):
+        assert(isinstance(scl_factor, numbers.Number))
+        return FilteringConfig(self.filter_type, self.sigma * scl_factor)
+
+class SymmetrizingFilterType(Enum):
+    TimeRev_Is_OppositeMask=1
+    TimeRev_Is_Negative=2
+
+class SymmetrizeFilteringConfig(AbstractFilteringConfig):
+    def __init__(self, filter_type):
+        self.filter_type = filter_type
+    def rescaled(self, _):
+        return self
+
+class FilteringConfig(AbstractFilteringConfig):
+    def __init__(self, filter_type=None, sigma=None, filters_pipeline=None):
+        if isinstance(filter_type, LowpassFilterType):
+            assert(isinstance(sigma, numbers.Number))
+            assert(filters_pipeline is None)
+            self.filters_pipeline = [LowpassFilteringConfig(filter_type, sigma=sigma)]
+        elif isinstance(filter_type, SymmetrizingFilterType):
+            assert(sigma is None)
+            self.filters_pipeline = [SymmetrizeFilteringConfig(filter_type)]
+        else:
+            assert(sigma is None)
+            assert(filter_type is None)
+            if filters_pipeline is not None:
+                for ftr in filters_pipeline:
+                    assert(isinstance(ftr, AbstractFilteringConfig))
+                self.filters_pipeline = filters_pipeline
+            else:
+                self.filters_pipeline = []
+    def rescaled(self, scl_factor):
+        return FilteringConfig(filters_pipeline
+                  = [ftr.rescaled(scl_factor) for ftr in self.filters_pipeline])
 
 def apply_filter(image, ftr_conf=6):
-    if type(ftr_conf) is not FilteringConfig:
-        ftr_conf = FilteringConfig(FilterType.Gaussian, ftr_conf)
-    return {
-       FilterType.Gaussian: lambda img:
+    if isinstance(ftr_conf, LowpassFilteringConfig):
+        return {
+       LowpassFilterType.Gaussian: lambda img:
           apply_gaussian_filter(img, ftr_conf.sigma)
-     , FilterType.Brickwall: lambda img:
+     , LowpassFilterType.Brickwall: lambda img:
           apply_brickwall_filter(img, ftr_conf.sigma)
+     , LowpassFilterType.BorderStretched_Gaussian: lambda img:
+          apply_borderstretched_gaussian_filter(img, ftr_conf.sigma)
      }[ftr_conf.filter_type](image)
+    elif isinstance(ftr_conf, SymmetrizeFilteringConfig):
+        return {
+       SymmetrizingFilterType.TimeRev_Is_OppositeMask: lambda imgs:
+          (imgs + 1 - torch.flip(imgs, dims=((-3,)))) / 2
+     , SymmetrizingFilterType.TimeRev_Is_Negative: lambda imgs:
+          (imgs - torch.flip(imgs, dims=((-3,)))) / 2
+     }[ftr_conf.filter_type](image)
+    elif isinstance(ftr_conf, FilteringConfig):
+        for iftr in ftr_conf.filters_pipeline:
+            image = apply_filter(image, iftr)
+        return image
+    else:
+        assert(isinstance(ftr_conf, numbers.Number)), f"{type(ftr_conf)}"
+        return apply_filter(image
+                , ftr_conf = FilteringConfig(LowpassFilterType.Gaussian, ftr_conf) )

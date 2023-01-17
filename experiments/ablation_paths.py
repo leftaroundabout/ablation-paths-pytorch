@@ -22,9 +22,11 @@ import torch
 import odl
 from monotone_paths import project_monotone_lInftymin, IntegrationOperator
 from ablation import compute_square_intensity
-from image_filtering import apply_filter
+from image_filtering import apply_filter, FilteringConfig, LowpassFilterType
 from imagenet_loading import load_single_image
 from itertools import count
+from abc import ABC, abstractmethod
+from enum import Enum
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -35,17 +37,18 @@ def all_indices(t):
 
 def monotonise_ablationpath(abl_seq):
     if type(abl_seq) is torch.Tensor:
-        # This should be generalised to work with any tensor shape,
-        # not just two spatial dimensions
-        for i,j in all_indices(abl_seq[0]):
-            thispixel = abl_seq[:,i,j].cpu().numpy()
+        assert(len(abl_seq.shape)>1), f"{abl_seq.shape=}"
+        for ij in all_indices(abl_seq[0]):
+            slicesel = (slice(None), *ij)
+            thispixel = abl_seq[slicesel].cpu().numpy()
             project_monotone_lInftymin(thispixel)
-            abl_seq[:,i,j] = torch.tensor(thispixel)
+            abl_seq[slicesel] = torch.tensor(thispixel)
     elif type(abl_seq) is np.ndarray:
-        for i,j in all_indices(abl_seq[0]):
-            thispixel = abl_seq[:,i,j]
+        for ij in all_indices(abl_seq[0]):
+            slicesel = (slice(None), *ij)
+            thispixel = abl_seq[slicesel]
             project_monotone_lInftymin(thispixel)
-            abl_seq[:,i,j] = thispixel
+            abl_seq[slicesel] = thispixel
     elif type(abl_seq) is odl.DiscretizedSpaceElement:
         ablseq_arr = abl_seq.asarray()
         for ij in all_indices(ablseq_arr[0]):
@@ -168,38 +171,225 @@ def repair_ablation_path_convexOpt( φ, distancespace_embedding=None
         return result.asarray()
 
 def resample_to_reso(v, tgt_shape):
-    if len(v.shape) < 4:
+    if len(v.shape) < len(tgt_shape)+2:
         return resample_to_reso(v.unsqueeze(0), tgt_shape).squeeze(0)
     elif v.shape[2:] == tgt_shape:
         return v
     else:
-        assert(len(tgt_shape)==2)
+        assert(len(tgt_shape)==2), f"{v.shape=}, {tgt_shape=}"
         return torch.nn.functional.interpolate( v, size=tgt_shape
                                               , mode='bilinear', align_corners=False )
         
 
+class RangeRemapping(ABC):
+    @abstractmethod
+    def to_unitinterval(self, x):
+        return NotImplemented
+    @abstractmethod
+    def from_unitinterval(self, y):
+        return NotImplemented
 
-def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=None
-                              , pointwise_scalar_product=False, gradients_postproc=lambda gs: gs
+class IdentityRemapping(RangeRemapping):
+    def __init__(self):
+        pass
+    def to_unitinterval(self, x):
+        return x
+    def from_unitinterval(self, y):
+        return y
+
+class SigmoidRemapping(RangeRemapping):
+    def __init__(self):
+        pass
+    def to_unitinterval(self, x):
+        return torch.sigmoid(x)
+    def from_unitinterval(self, y):
+        # https://stackoverflow.com/a/66116934/745903
+        return -torch.log(torch.reciprocal(y) - 1)
+
+class SelectableHardnessClipping(RangeRemapping):
+    def __init__(self, hardness=2):
+        self.hardness=hardness
+    def from_unitinterval(self, y):
+        return y - (1/y + 1/(y-1))/self.hardness
+    def to_unitinterval(self, x):
+        # x = y − (1/y + 1/(y−1))/h
+        # x·h·y·(y-1) = h·y²·(y−1) − (y−1) − y
+        # x·h·y² − x·h·y − h·y³ + h·y² + 2·y − 1 = 0
+        # y³ − (x+1)·y² + (x−2/h)·y + 1/h = 0
+        # y =: t + (x+1)/3
+        # y² = t² + ⅔·t·(x+1) + (x+1)²/9
+        # y³ = t³ + t²·(x+1) + t·(x+1)²/3 + (x+1)³/27
+        # t³ + t²·(x+1) + t·(x+1)²/3 + (x+1)³/27
+        #  − (x+1)·(t² + ⅔·t·(x+1) + (x+1)²/9)
+        #  + (x−2/h)·(t + (x+1)/3) + 1/h = 0
+        # t³ − (x+1)²·t/3 − 2/27·(x+1)³
+        #  + (x−2/h)·t + (x−2/h)·(x+1)/3 + 1/h = 0
+        # 0 = t³
+        #      + (x − (x+1)²/3 − 2/h)·t              } p
+        #      + (x−2/h)·(x+1)/3 − 2/27·(x+1)³ + 1/h } q
+        h = self.hardness
+        p = x - (x+1)**2/3 - 2/h
+        q = (x-2/h)*(x+1)/3 - 2/27*(x+1)**3 + 1/h
+        # w := √(-p/3)
+        w = torch.sqrt(-p/3)
+        t = 2*w*torch.cos(torch.acos(3*q/(2*p*w))/3 - 2*np.pi/3)
+        return t + (x+1)/3
+
+class SelectableHardnessSigmoid(RangeRemapping):
+    def __init__(self, hardness=2):
+        self.hardness=hardness
+    def from_unitinterval(self, y):
+        z = 2*y - 1   # Change range to [-1,1]
+        return z + z / (self.hardness * (1 - z**2))
+    def to_unitinterval(self, x):
+        # x = z + z/(h·(1−z²))
+        # h·x·(1-z²) = z·h·(1−z²) + z
+        # h·x − h·x·z² = z·h − h·z³ + z
+        # h·z³ − h·x·z² − z·(1 + h) + h·x = 0
+        # z =: t + x/3
+        # h·(t + x/3)³ − h·x·(t + x/3)² − (t + x/3)·(1+h) + h·x = 0
+        # h·t³ + h·x·t² + h·x²·t/3 + h·x³/27
+        #              − h·x·t² − ⅔·h·x²·t − h·x³/9
+        #                               − t − h·t − x/3 − h·x/3
+        #                                                 + h·x = 0
+        # h·t³ − (h·x²/3 + 1 + h)·t − h·x³·2/27 − x/3 + ⅔·h·x = 0
+        # t³ − (x²/3 + 1/h + 1)·t − x³·2/27 − x/3h + ⅔·x = 0
+        # p := -(x²/3 + 1/h + 1)
+        p = -(x**2/3 + 1/self.hardness + 1)
+        # q := -x³·2/27 − x/3h + ⅔·x
+        q = -x**3*2/27 - x/(3*self.hardness) + 2/3*x
+        # w := √(-p/3)
+        w = torch.sqrt(-p/3)
+        # t = 2·w·cos(⅓·acos(3·q/(2·p·w)) − ⅔·π)
+        # (Viète 2006, doi:10.1017/S0025557200179598)
+        t = 2*w*torch.cos(torch.acos(3*q/(2*p*w))/3 - 2*np.pi/3)
+        z = t + x/3
+        return (z+1) / 2
+
+class OptstepStrategy(ABC):
+    @abstractmethod
+    def factor_for_update(self, update):
+        return NotImplemented
+
+class ConstFactorOptStep(OptstepStrategy):
+    def __init__(self, const_update_factor):
+        self.const_update_factor = const_update_factor
+    def factor_for_update(self, update):
+        return self.const_update_factor
+
+class LInftyNormalizingOptStep(OptstepStrategy):
+    def __init__(self, update_supremum):
+        self.update_supremum = update_supremum
+    def factor_for_update(self, update):
+        norm = float(torch.max(torch.abs(update)))
+        return self.update_supremum/norm
+
+class AblPathObjective(Enum):
+    FwdLongestRetaining=0
+    BwdQuickestDissipating=1
+    FwdRetaining_BwdDissipating=2
+
+def gradientMove_ablation_path( model, x, baseline, abl_seq
+                              , optstep
+                              , objective=AblPathObjective.FwdLongestRetaining
+                              , label_nr=None
+                              , pointwise_scalar_product=True
+                              , gradients_postproc=lambda gs: gs
+                              , range_remapping = IdentityRemapping()
                               ):
-    needs_resampling = x.shape[1:] != abl_seq.shape[1:]
+    nSq = abl_seq.shape[0]
+    mask_shape = abl_seq.shape[1:]
+    nCh = x.shape[0]
+    img_shape = x.shape[1:]
+
+    needs_resampling = mask_shape != img_shape
 
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
     elif label_nr=='baseline_label':
         label_nr = torch.argmax(model(baseline.unsqueeze(0)))
-    nSq, wMask, hMask = abl_seq.shape
-    nCh, wX, hX = x.shape
 
-    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
-                      ).repeat(1,nCh,1,1)
-    xOpt = x.to(abl_seq.device)
-    difference = baseline.to(abl_seq.device) - xOpt
+
+    # Suitably reshaped and resampled version of mask, for applying (with
+    # auto-broadcast channel dimension) to target- and baseline images.
+    resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq, 1, *mask_shape)
+                                        , img_shape
+                                        )
+
+    # If given a suitable remapping function, use it for a representation
+    # of the ablation path that is not limited to the range [0,1].
+    delimited_abl_seq = range_remapping.from_unitinterval(resampled_abl_seq)
+
+    x_opt = x.to(abl_seq.device)
     
+    difference = baseline.to(abl_seq.device) - x_opt
+    
+    assert(pointwise_scalar_product
+      ), "Optimising without pointwise scalar product currently not supported."
+
+    delimited_abl_seq.requires_grad = True
+    argument = (x_opt + difference.to(abl_seq.device)
+                         * { AblPathObjective.FwdLongestRetaining:
+                                lambda rabs: rabs
+                           , AblPathObjective.BwdQuickestDissipating:
+                                lambda rabs: 1-rabs
+                           , AblPathObjective.FwdRetaining_BwdDissipating:
+                                lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
+                           }[objective]
+                            (range_remapping.to_unitinterval(delimited_abl_seq))
+                   )
+
+    n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
+                           else nSq )
+    n_negative_weighted = ( 0 if objective is AblPathObjective.FwdLongestRetaining
+                           else nSq )
+
+    model_result = model(argument)
+    n_evals, n_classes = model_result.shape[:2]
+    assert(n_evals == n_positive_weighted+n_negative_weighted
+          ), f"{n_positive_weighted=}, {n_negative_weighted=}, {n_evals=}"
+
+    # Ablation path score, computed as the "integral": average of the
+    # target-class probability over the path. Backward-dissipating contributions
+    # are weighed negatively.
+    intg_score = torch.mean(
+                    torch.softmax(model_result.reshape(n_evals,n_classes), -1)
+                                       [:, label_nr]
+                   * torch.tensor([1 for _ in range(n_positive_weighted)]
+                                  + [-1 for _ in range(n_negative_weighted)] )
+                          .to(abl_seq.device)
+                  ) * (2 if objective is AblPathObjective.FwdRetaining_BwdDissipating
+                        else 1)
+
+    # Gradient of the integral-score, as a function of the entire mask-path;
+    # in shape of its oversampled form.
+    grad = torch.autograd.grad( intg_score
+                              , delimited_abl_seq )[0][:,0]
+
+    grad = gradients_postproc(grad)
+
+    if optstep is None:
+        raise NotImplementedError("Automatic opt-step selection")
+    elif isinstance(optstep, float):
+        update = grad * optstep
+    elif isinstance(optstep, OptstepStrategy):
+        update = grad * optstep.factor_for_update(grad)
+    assert(update.shape==(nSq, *img_shape))
+    
+    resampled_abl_seq = range_remapping.to_unitinterval(
+                delimited_abl_seq[:,0] + update
+                           ).detach()
+
+    abl_seq[:] = resample_to_reso(resampled_abl_seq, mask_shape)
+
+    return float(intg_score)
+
+    ### OLD VERSION, taking the pointwise scalar product separately instead of
+    #   as part of the to-be-optimised computation.
+    gs = torch.zeros(nSq, nCh, *img_shape).to(abl_seq.device)
+
     # The path score, which is to be computed as an integral.
     intg = 0
-
-    gs = torch.zeros(nSq, nCh, wX, hX).to(abl_seq.device)
 
     for i in range(nSq):
         argument = (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
@@ -211,7 +401,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
 
     gs = gradients_postproc(gs)
 
-    abl_update = torch.zeros(nSq, wX, hX).to(abl_seq.device)
+    abl_update = torch.zeros(nSq, *img_shape).to(abl_seq.device)
     for i in range(nSq):
         direction = ( torch.sum(gs[i] * difference, 0)
                        if pointwise_scalar_product
@@ -222,7 +412,7 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq, optstep, label_nr=N
         else:
             abl_update[i] = optstep*direction
     if needs_resampling:
-        abl_seq += resample_to_reso(abl_update, (wMask,hMask))
+        abl_seq += resample_to_reso(abl_update, mask_shape)
     else:
         abl_seq += abl_update
     return intg
@@ -234,11 +424,11 @@ def saturated_masks(φ, saturation):
 
 def path_optimisation_sequence (
           model, x, baselines, path_steps, optstep
-        , saturation=0, filter_cfg=0, filter_mix_ratio=1
+        , saturation=0, filter_cfg=None, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
         , momentum_inertia=0
-        , **kwargs):
+        , **kwargs ):
     if ablmask_resolution is None:
         ablmask_resolution = x.shape[1:]
     pth = ( torch.stack([p*torch.ones(ablmask_resolution)
@@ -261,34 +451,83 @@ def path_optimisation_sequence (
             pth = saturated_masks(pth,saturation)
         def filterWith(σ):
             if ablmask_resolution is not None:
-                wMask, hMask = ablmask_resolution
-                w, h = x.shape[1:]
-                scale_factor = np.sqrt(wMask*hMask/(w*h))
+                img_shape = x.shape[1:]
+                scale_factor = np.sqrt( np.product(ablmask_resolution)
+                                       / np.product(img_shape) )
             nonlocal pth
-            pth = pth*(1-filter_mix_ratio) + apply_filter(pth, σ*scale_factor)*filter_mix_ratio
+            pth = ( pth*(1-filter_mix_ratio)
+                   + apply_filter(pth, σ.rescaled(scale_factor))*filter_mix_ratio )
         if callable(filter_cfg):
             filterWith(filter_cfg(i))
-        elif filter_cfg>0:
+        elif filter_cfg is not None:
             filterWith(filter_cfg)
         pth = pathrepairer(pth)
         if momentum_inertia>0:
             momentum = pth - old_pth
         yield pth, current_score
 
+class PathOptFinishCriterion(ABC):
+    def __init__(self, subcriteria_dnf):
+        self._subcriteria_dnf = subcriteria_dnf
+
+    def __call__(self, iterations_done, abl_path, score):
+        return any([all([c(iterations_done, abl_path, score)
+                          for c in cs])
+                     for cs in self._subcriteria_dnf])
+
+    def _as_criteria_dnf(self):
+        return ( self._subcriteria_dnf
+                if (type(self) is PathOptFinishCriterion)
+                else [[self]] )
+
+    def _as_criteria_conjunction(self):
+        return ( self._subcriteria_dnf[0]
+                if (type(self) is PathOptFinishCriterion
+                     and len(self._subcriteria_dnf)==1)
+                else [self] )
+
+    def __or__(self, other):
+        return PathOptFinishCriterion(
+           self._as_criteria_dnf() + other._as_criteria_dnf() )
+
+    def __and__(self, other):
+        return PathOptFinishCriterion(
+           [self._as_criteria_conjunction() + other._as_criteria_conjunction()] )
+
+class FixedStepCount(PathOptFinishCriterion):
+    def __init__(self, n_iterations):
+        self.n_iterations = n_iterations
+
+    def __call__(self, iterations_done, abl_path, score):
+        return iterations_done >= self.n_iterations
+
+def path_saturation(abl_path):
+    return torch.mean(2 * torch.abs(abl_path - 0.5));
+
+class SaturationTarget(PathOptFinishCriterion):
+    def __init__(self, saturation_target):
+        self.saturation_target = saturation_target
+
+    def __call__(self, iterations_done, abl_path, score):
+        return float(path_saturation(abl_path)
+                    ) >= self.saturation_target
+
+
 def optimised_path( model, x, baselines, path_steps, optstep
-                  , iterations, abort_criterion=(lambda scr: False)
+                  , finish_criterion
                   , logging_destination=None
                   , progress_on_stdout=False
                   , **kwargs):
     i = 0
     for pth, current_score in path_optimisation_sequence (
           model, x, baselines, path_steps, optstep, **kwargs ):
-        if i>=iterations or abort_criterion(current_score):
+        if finish_criterion(i, pth, current_score):
             return pth
         if logging_destination is not None:
             print(current_score, file=logging_destination, flush=True)
         if progress_on_stdout:
-            print(current_score)
+            sat = float(path_saturation(pth))
+            print(f"saturation: {sat:.2f}, score: {current_score:.3f}", end="\r")
         i+=1
 
 def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
@@ -296,11 +535,13 @@ def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
     if type(abl_seq) != torch.Tensor:
         abl_seq = torch.stack(list(abl_seq))
     xOpt = x.to(abl_seq.device)
-    nSq, wMask, hMask = abl_seq.shape
-    nCh, wX, hX = x.shape
+    nSq = abl_seq.shape[0]
+    mask_shape = abl_seq.shape[1:]
+    nCh = x.shape[0]
+    img_shape = x.shape[1:]
 
-    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq,1,wMask,hMask), (wX, hX)
-                      ).repeat(1,nCh,1,1)
+    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape
+                      ).repeat(1, nCh, *[1 for _ in img_shape])
 
     difference = baseline.to(abl_seq.device) - xOpt
     if include_endpoints:
@@ -313,8 +554,9 @@ def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
                    ).detach()
                   for i in range(nSq) ]
 
-def find_class_transition( model, x, baseline, abl_seq
-                         , minimum_ablation_pos=0.25, label_nr=None ):
+def most_salient_mask_in_path( abl_seq, model, x, baseline
+                             , minimum_ablation_pos=0.25, label_nr=None
+                             , fallback_to_best_scoring=True ):
     if len(abl_seq) <= 1:
         return 0
 
@@ -328,15 +570,22 @@ def find_class_transition( model, x, baseline, abl_seq
     while imax>=min_allowed_i and torch.argmax(predictions[imax])!=label_nr:
         imax -= 1
     if imax < min_allowed_i:
-        best_score = 0
+        if not fallback_to_best_scoring:
+            return None
+        best_score = -np.inf
         imax = min_allowed_i
         for i in range(min_allowed_i, len(abl_seq)):
             score = torch.softmax(predictions[i], 0)[label_nr]
             if score > best_score:
-                score = best_score
+                best_score = score
                 imax = i
-    print("imax = %i" % imax)
     return imax
+
+# This function only considers transitions from the requested class to another one.
+def find_class_transition( model, x, baseline, abl_seq, **kwargs ):
+    return most_salient_mask_in_path( abl_seq, model, x, baseline
+                                    , fallback_to_best_scoring=False
+                                    , **kwargs )
 
 def load_ablation_path_from_images(fns, size_spec=None, path_steps=None, torchdevice=None):
     if size_spec is None:
@@ -357,3 +606,52 @@ def load_ablation_path_from_images(fns, size_spec=None, path_steps=None, torchde
            [ path_candidate[int(len(path_masks)*j/path_steps)]
             for j in range(path_steps) ])
     return path_candidate
+
+
+def bordervanish_window(m):
+    if isinstance(m, torch.Tensor):
+        ys, xs = torch.meshgrid( torch.linspace(0, np.pi, m.shape[-2])
+                                                , torch.linspace(0, np.pi, m.shape[-1]) )
+        window = torch.sqrt(torch.clamp(torch.sin(xs) * torch.sin(ys), min=0, max=1)
+                                                  ).to(m.device)
+        return m * window
+    elif isinstance(m, np.ndarray):
+        return bordervanish_window(torch.tensor(m)).numpy()
+    else:
+        raise TypeError(f"Expected torch.Tensor or numpy.ndarray, got {type(m)}")
+
+def standard_grad_postproc( filter_conf = FilteringConfig(None)
+                          , suppress_borders = False
+                          , remove_const_bias = True ):
+    def gpp(g):
+        if suppress_borders:
+            g = bordervanish_window(g)
+        if remove_const_bias:
+            g -= torch.mean(g, dim=(-2,-1), keepdim=True)
+        return apply_filter(g, filter_conf)
+    return gpp
+
+def quick_tensor_info(t):
+    return f"shape: {t.shape}, min: {torch.min(t)}, max: {torch.max(t)}"
+
+def influence_weighted_increment_saliency(
+                 abl_seq, model, x, baseline
+               , label_nr=None ):
+    assert(len(abl_seq) >= 1)
+    
+    abl_seq = torch.concat([ torch.zeros_like(abl_seq[0]).unsqueeze(0)
+                           , abl_seq
+                           , torch.ones_like(abl_seq[0]).unsqueeze(0) ])
+
+    predictions = torch.softmax(model(torch.stack(
+                     masked_interpolation( x,baseline,abl_seq ))), 1).detach()
+    
+    if label_nr is None:
+        label_nr = torch.argmax(predictions[0])
+
+    influences = predictions[:-1, label_nr] - predictions[1:, label_nr]
+    increments = abl_seq[1:] - abl_seq[:-1]
+    
+    # We have two differentials and one integration, so need to divide once
+    # by the size of the steps (or equivalenty, multiply once by their number)
+    return increments.shape[0] * torch.sum(influences * increments, axis=0)
