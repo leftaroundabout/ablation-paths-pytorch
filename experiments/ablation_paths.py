@@ -26,7 +26,9 @@ from image_filtering import apply_filter, FilteringConfig, LowpassFilterType
 from imagenet_loading import load_single_image
 from itertools import count
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -512,6 +514,20 @@ class SaturationTarget(PathOptFinishCriterion):
         return float(path_saturation(abl_path)
                     ) >= self.saturation_target
 
+@dataclass
+class AblPathStateSummary:
+    path: torch.Tensor
+    score: float
+    saturation: float
+
+@dataclass
+class AblPathOptimProgressShower:
+    summary_show: Callable[[AblPathStateSummary], str]
+    overwrite_same_line: bool = True
+    def __call__(self, summary: AblPathStateSummary):
+        return self.summary_show(summary)
+    def __bool__(self):
+        return True
 
 def optimised_path( model, x, baselines, path_steps, optstep
                   , finish_criterion
@@ -527,7 +543,12 @@ def optimised_path( model, x, baselines, path_steps, optstep
             print(current_score, file=logging_destination, flush=True)
         if progress_on_stdout:
             sat = float(path_saturation(pth))
-            print(f"saturation: {sat:.2f}, score: {current_score:.3f}", end="\r")
+            if isinstance(progress_on_stdout, AblPathOptimProgressShower):
+                print( progress_on_stdout(AblPathStateSummary(
+                        path=pth, score=current_score, saturation=sat))
+                     , end=("\r" if progress_on_stdout.overwrite_same_line else "\n") )
+            else:
+                print(f"saturation: {sat:.2f}, score: {current_score:.3f}", end="\r")
         i+=1
 
 def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
