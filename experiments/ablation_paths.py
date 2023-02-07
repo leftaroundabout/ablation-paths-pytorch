@@ -292,12 +292,21 @@ class AblPathObjective(Enum):
     FwdRetaining_BwdDissipating=2
 
 class PathsSpace(ABC):
+    """An abstract notion of what it means to interpolate along paths of
+    masks in order to obtain paths of images. Corresponds roughly to what
+    [Fong&Vedaldi 2017] call “pertubations”.
+    
+    The simplest such notion – linear interpolation from the target image
+    to a baseline – is captured by `LinInterpPathsSpace`."""
+    @abstractmethod
     def apply_mask_seq(self, abl_seq: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
     @property
+    @abstractmethod
     def target_image(self):
         raise NotImplementedError
     @property
+    @abstractmethod
     def baseline_image(self):
         raise NotImplementedError
 
@@ -418,31 +427,28 @@ def saturated_masks(φ, saturation):
                        + torch.ones_like(φ))/2
 
 def path_optimisation_sequence (
-          model, x, baselines, path_steps, optstep
+          model, pathspaces, path_steps, optstep
         , saturation=0, filter_cfg=None, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
         , momentum_inertia=0
         , **kwargs ):
+    x_example = pathspaces().target_image
+    img_shape = x_example.shape[1:]
     if ablmask_resolution is None:
-        ablmask_resolution = x.shape[1:]
+        ablmask_resolution = img_shape
     pth = ( torch.stack([p*torch.ones(ablmask_resolution)
                          for p in np.linspace(0,1,path_steps)[1:-1]])
-                   .to(x.device)
+                   .to(x_example.device)
              if initpth is None else initpth )
     if momentum_inertia>0:
         momentum = torch.zeros_like(pth)
-
-    pathspace = LinInterpPathsSpace(
-          x
-        , baselines()  # This does not work for stochastic GD, TODO
-        )
 
     for i in count():
         if momentum_inertia>0:
             old_pth = pth.clone().detach()
         current_score = gradientMove_ablation_path(
-            model, pathspace, abl_seq=pth, optstep=optstep, **kwargs )
+            model, pathspaces(), abl_seq=pth, optstep=optstep, **kwargs )
         if momentum_inertia>0:
             momentum = ( momentum * momentum_inertia
                         + (pth - old_pth)*(1-momentum_inertia) )
@@ -451,7 +457,6 @@ def path_optimisation_sequence (
             pth = saturated_masks(pth,saturation)
         def filterWith(σ):
             if ablmask_resolution is not None:
-                img_shape = x.shape[1:]
                 scale_factor = np.sqrt( np.product(ablmask_resolution)
                                        / np.product(img_shape) )
             nonlocal pth
@@ -527,14 +532,30 @@ class AblPathOptimProgressShower:
     def __bool__(self):
         return True
 
-def optimised_path( model, x, baselines, path_steps, optstep
-                  , finish_criterion
+def optimised_path( model, x=None, baselines=None
+                  , path_steps=16, optstep=LInftyNormalizingOptStep(0.5)
+                  , finish_criterion= FixedStepCount(6) &
+                                       (SaturationTarget(0.8) | FixedStepCount(100))
+                  , pathspaces=None
                   , logging_destination=None
                   , progress_on_stdout=False
                   , **kwargs):
+    if pathspaces is None:
+        assert(x is not None)
+        if callable(baselines):
+             pathspaces = lambda: LinInterpPathsSpace(x, baselines())
+        elif isinstance(baselines, torch.Tensor):
+             pathspace = LinInterpPathsSpace(x, baselines())
+             pathspaces = lambda: pathspace
+        else:
+             raise TypeError(f"Unsupported {type(baselines)=}")
+    else:
+        assert(x is None and baselines is None)
+
     i = 0
+
     for pth, current_score in path_optimisation_sequence (
-          model, x, baselines, path_steps, optstep, **kwargs ):
+          model, pathspaces, path_steps, optstep, **kwargs ):
         if finish_criterion(i, pth, current_score):
             return pth
         if logging_destination is not None:
