@@ -294,17 +294,30 @@ class AblPathObjective(Enum):
 class PathsSpace(ABC):
     def apply_mask_seq(self, abl_seq: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
+    @property
+    def target_image(self):
+        raise NotImplementedError
+    @property
+    def baseline_image(self):
+        raise NotImplementedError
 
 class LinInterpPathsSpace(PathsSpace):
     def __init__(self, x, baseline):
         assert(x.shape == baseline.shape)
         self.x = x
+        self.baseline = baseline
         self.difference = baseline - x
     def apply_mask_seq(self, abl_seq: torch.Tensor):
         assert(abl_seq.shape[1]==1 and self.x.shape[1:] == abl_seq.shape[2:])
         return self.x + self.difference * abl_seq
+    @property
+    def target_image(self):
+        return self.x
+    @property
+    def baseline_image(self):
+        return self.baseline
 
-def gradientMove_ablation_path( model, x, baseline, abl_seq
+def gradientMove_ablation_path( model, pathspace, abl_seq
                               , optstep
                               , objective=AblPathObjective.FwdLongestRetaining
                               , label_nr=None
@@ -314,6 +327,8 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
                               ):
     nSq = abl_seq.shape[0]
     mask_shape = abl_seq.shape[1:]
+    x = pathspace.target_image
+    baseline = pathspace.baseline_image
     nCh = x.shape[0]
     img_shape = x.shape[1:]
 
@@ -335,10 +350,6 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
     # of the ablation path that is not limited to the range [0,1].
     delimited_abl_seq = range_remapping.from_unitinterval(resampled_abl_seq)
 
-    x_opt = x.to(abl_seq.device)
-    
-    pathspace = LinInterpPathsSpace(x_opt, baseline.to(abl_seq.device))
-    
     assert(pointwise_scalar_product
       ), "Optimising without pointwise scalar product currently not supported."
 
@@ -454,11 +465,16 @@ def path_optimisation_sequence (
     if momentum_inertia>0:
         momentum = torch.zeros_like(pth)
 
+    pathspace = LinInterpPathsSpace(
+          x
+        , baselines()  # This does not work for stochastic GD, TODO
+        )
+
     for i in count():
         if momentum_inertia>0:
             old_pth = pth.clone().detach()
         current_score = gradientMove_ablation_path(
-            model, x, baselines(), abl_seq=pth, optstep=optstep, **kwargs )
+            model, pathspace, abl_seq=pth, optstep=optstep, **kwargs )
         if momentum_inertia>0:
             momentum = ( momentum * momentum_inertia
                         + (pth - old_pth)*(1-momentum_inertia) )
