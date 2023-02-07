@@ -411,38 +411,6 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
 
     return float(intg_score)
 
-    ### OLD VERSION, taking the pointwise scalar product separately instead of
-    #   as part of the to-be-optimised computation.
-    gs = torch.zeros(nSq, nCh, *img_shape).to(abl_seq.device)
-
-    # The path score, which is to be computed as an integral.
-    intg = 0
-
-    for i in range(nSq):
-        argument = (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
-                   ).detach().unsqueeze(0)
-        argument.requires_grad = True
-        result = torch.softmax(model(argument)[0], 0)
-        gs[i] = torch.autograd.grad(result[label_nr], argument)[0].squeeze(0)
-        intg += float(result[label_nr])/abl_seq.shape[0]
-
-    gs = gradients_postproc(gs)
-
-    abl_update = torch.zeros(nSq, *img_shape).to(abl_seq.device)
-    for i in range(nSq):
-        direction = ( torch.sum(gs[i] * difference, 0)
-                       if pointwise_scalar_product
-                       else -torch.sqrt(compute_square_intensity(gs[i])) )
-        direction -= torch.sum(direction)/torch.sum(torch.ones_like(direction))
-        if optstep is None:
-            abl_update[i] = direction/(torch.max(direction) - torch.min(direction))
-        else:
-            abl_update[i] = optstep*direction
-    if needs_resampling:
-        abl_seq += resample_to_reso(abl_update, mask_shape)
-    else:
-        abl_seq += abl_update
-    return intg
 
 def saturated_masks(φ, saturation):
     return (torch.tanh( (φ*2 - torch.ones_like(φ))*saturation )
