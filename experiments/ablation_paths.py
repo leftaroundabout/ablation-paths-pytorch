@@ -291,6 +291,19 @@ class AblPathObjective(Enum):
     BwdQuickestDissipating=1
     FwdRetaining_BwdDissipating=2
 
+class PathsSpace(ABC):
+    def apply_mask_seq(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+class LinInterpPathsSpace(PathsSpace):
+    def __init__(self, x, baseline):
+        assert(x.shape == baseline.shape)
+        self.x = x
+        self.difference = baseline - x
+    def apply_mask_seq(self, abl_seq: torch.Tensor):
+        assert(abl_seq.shape[1]==1 and self.x.shape[1:] == abl_seq.shape[2:])
+        return self.x + self.difference * abl_seq
+
 def gradientMove_ablation_path( model, x, baseline, abl_seq
                               , optstep
                               , objective=AblPathObjective.FwdLongestRetaining
@@ -324,14 +337,15 @@ def gradientMove_ablation_path( model, x, baseline, abl_seq
 
     x_opt = x.to(abl_seq.device)
     
-    difference = baseline.to(abl_seq.device) - x_opt
+    pathspace = LinInterpPathsSpace(x_opt, baseline.to(abl_seq.device))
     
     assert(pointwise_scalar_product
       ), "Optimising without pointwise scalar product currently not supported."
 
     delimited_abl_seq.requires_grad = True
-    argument = (x_opt + difference.to(abl_seq.device)
-                         * { AblPathObjective.FwdLongestRetaining:
+
+    argument = pathspace.apply_mask_seq(
+                           { AblPathObjective.FwdLongestRetaining:
                                 lambda rabs: rabs
                            , AblPathObjective.BwdQuickestDissipating:
                                 lambda rabs: 1-rabs
