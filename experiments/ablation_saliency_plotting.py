@@ -36,7 +36,8 @@ import hvplot.pandas
 from ablation_paths import ( masked_interpolation
                            , find_class_transition
                            , resample_to_reso
-                           , AblPathObjective )
+                           , AblPathObjective
+                           , LinInterpPathsSpace )
 from image_filtering import apply_gaussian_filter
 
 def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
@@ -518,7 +519,9 @@ intuitive_saliency_mask_combo_img_views = [
   , MaskOverlayed( 'interpolation_result', MaskMidlevelContour() )
   ]
 
-def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=None
+def interactive_view_mask( abl_seq, x=None, baseline=None
+                         , pathspace=None
+                         , model=None, labels=None
                          , view_x=DeemphasizeIrrelevant()
                          , view_masks=False, view_interpolation=auto, view_classification=auto
                          , view_scoregraph=False
@@ -528,6 +531,16 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                          , focused_labels=[]
                          , objective_class=None
                          , viewers_size=auto, classification_name=None, **kwargs ):
+
+    if pathspace is None:
+        if(x is not None and baseline is not None):
+            pathspace = LinInterpPathsSpace(x, baseline)
+    else:
+        assert(x is None and baseline is None)
+        x = pathspace.target_image
+        baseline = pathspace.baseline_image
+        
+
     n_ablseq = abl_seq.shape[0]
     def to_unit_range(y):
         return (2*y - image_valrange[0] - image_valrange[1]
@@ -558,13 +571,15 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                            , torch.ones_like(abl_seq[0:1]) ] ))
                            for ooc in [lambda abls: abls, lambda abls: 1-abls] ] )
     n_tested = abl_seq_wEndpoints.shape[0]
-    interpol_seq = masked_interpolation(x, baseline, abl_seq_wEndpoints
+    interpol_seq = masked_interpolation(pathspace=pathspace, abl_seq=abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
-    interpol_seq_normrng = [to_unit_range(i) for i in interpol_seq]
+    interpol_seq_normrng = torch.stack([to_unit_range(interpol_seq[i])
+                                          for i in range(interpol_seq.shape[0])])
     if add_overlay_mask_as_hue:
-        interpol_seq_maskhint = [ overlay_mask_as_hue
+        interpol_seq_maskhint = torch.stack(
+                                 [ overlay_mask_as_hue
                                            ( interpol_seq_normrng[i], abl_seq_wEndpoints[i] )
-                                   for i in range(n_tested) ]
+                                   for i in range(n_tested) ] )
     else:
         interpol_seq_maskhint = interpol_seq_normrng
     if view_x is True:
@@ -583,7 +598,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None, model=None, labels=No
                                    for i in range(n_tested) ]
         interpol_seq_maskhint = interpol_seq_contours
     if view_classification or view_scoregraph:
-        classifications = model(torch.stack(interpol_seq).to(torchdevice)).detach().clone()
+        classifications = model(interpol_seq.to(torchdevice)).detach().clone()
         clshape = classifications.shape
         classifications = classifications.reshape(n_tested, clshape[1])
     if view_scoregraph:

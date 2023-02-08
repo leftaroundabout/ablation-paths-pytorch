@@ -591,6 +591,9 @@ def optimised_path( model, x=None, baselines=None
              raise TypeError(f"Unsupported {type(baselines)=}")
     else:
         assert(x is None and baselines is None)
+        if isinstance(pathspaces, PathsSpace):
+            const_pathspace = pathspaces
+            pathspaces = lambda: const_pathspace
 
     i = 0
 
@@ -610,7 +613,16 @@ def optimised_path( model, x=None, baselines=None
                 print(f"saturation: {sat:.2f}, score: {current_score:.3f}", end="\r")
         i+=1
 
-def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
+def masked_interpolation(x=None, baseline=None, abl_seq=None, pathspace=None, include_endpoints=False):
+
+    if pathspace is None:
+        assert(x is not None and baseline is not None)
+        pathspace = LinInterpPathsSpace(x, baseline)
+    else:
+        assert(x is None and baseline is None)
+        x = pathspace.target_image
+        baseline = pathspace.baseline_image
+
     needs_resampling = x.shape[1:] != abl_seq.shape[1:]
     if type(abl_seq) != torch.Tensor:
         abl_seq = torch.stack(list(abl_seq))
@@ -620,19 +632,15 @@ def masked_interpolation(x, baseline, abl_seq, include_endpoints=False):
     nCh = x.shape[0]
     img_shape = x.shape[1:]
 
-    ch_rpl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape
-                      ).repeat(1, nCh, *[1 for _ in img_shape])
+    rspl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape)
 
-    difference = baseline.to(abl_seq.device) - xOpt
     if include_endpoints:
-        return ( [x] + [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
-                   ).detach()
-                  for i in range(nSq) ]
-                 + [baseline] )
-    else:
-        return [ (xOpt + difference.to(abl_seq.device)*ch_rpl_seq[i]
-                   ).detach()
-                  for i in range(nSq) ]
+        rspl_seq = torch.concat( [ torch.zeros_like(rspl_seq[0]).unsqueeze(0)
+                                 , rspl_seq
+                                 , torch.ones_like(rspl_seq[-1]).unsqueeze(0) ]
+                               , dim=0 )
+
+    return pathspace.apply_mask_seq(rspl_seq)
 
 def most_salient_mask_in_path( abl_seq, model, x, baseline
                              , minimum_ablation_pos=0.25, label_nr=None
@@ -643,8 +651,7 @@ def most_salient_mask_in_path( abl_seq, model, x, baseline
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
 
-    predictions = model(torch.stack(
-                               masked_interpolation(x,baseline,abl_seq)))
+    predictions = model(masked_interpolation(x,baseline,abl_seq))
     imax = len(abl_seq) - 1
     min_allowed_i = int(len(abl_seq) * minimum_ablation_pos)
     while imax>=min_allowed_i and torch.argmax(predictions[imax])!=label_nr:
@@ -723,8 +730,8 @@ def influence_weighted_increment_saliency(
                            , abl_seq
                            , torch.ones_like(abl_seq[0]).unsqueeze(0) ])
 
-    predictions = torch.softmax(model(torch.stack(
-                     masked_interpolation( x,baseline,abl_seq ))), 1).detach()
+    predictions = torch.softmax(model(
+                     masked_interpolation( x,baseline,abl_seq )), 1).detach()
     
     if label_nr is None:
         label_nr = torch.argmax(predictions[0])
