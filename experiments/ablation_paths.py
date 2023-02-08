@@ -332,12 +332,13 @@ class BlurPyramidPathsSpace(PathsSpace):
     filter with position-dependent cutoff. It corresponds to the
     `BLUR_PERTURBATION` option of the TorchRay `Pertubation` class."""
     def __init__(self, x, num_levels=8, max_blur=20):
-        self.x = x
-        h,w = x.shape
+        nCh,h,w = x.shape[-3:]
+        self.x = x.reshape(nCh,h,w)
         self.pyramid = torch.cat(
-              [ apply_filter(x.reshape(1,h,w), (1-s)*max_blur)
+              [ apply_filter( self.x.unsqueeze(0)
+                               , float(1-s)*max_blur )
                for s in torch.linspace(0, 1, num_levels) ]
-            , dim=0 )
+            , dim=0 ).flip(0)
         self.pyramid.requires_grad = False
 
     def apply_mask_seq(self, abl_seq: torch.Tensor):
@@ -355,7 +356,7 @@ class BlurPyramidPathsSpace(PathsSpace):
         y = y.expand(n, *y.shape[1:])
         k = k.expand(n, 1, *y.shape[2:])
         y0 = torch.gather(y, 1, k)
-        y1 = torch.gather(y, 1, torch.clamp(k + 1, max=self.num_levels - 1))
+        y1 = torch.gather(y, 1, torch.clamp(k + 1, max=num_levels - 1))
 
         return ((1 - w) * y0 + w * y1).squeeze(dim=1)
 
