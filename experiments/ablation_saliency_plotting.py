@@ -69,9 +69,9 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
 
     def relevant_predictions():
         complete_classif, contrast_classif = [
-                   {method: [ torch.softmax(model(torch.stack(
+                   {method: [ torch.softmax(model(
                                  masked_interpolation( x, baseline, co(abl_seq)
-                                                     , include_endpoints=include_endpoints ))
+                                                     , include_endpoints=include_endpoints )
                                             ), dim=1).detach()
                                      for baseline in baseline_samples ]
                               for method, abl_seq in abl_series }
