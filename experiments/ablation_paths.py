@@ -29,6 +29,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
+from numbers import Number
 
 def all_indices(t):
     result = list([(k,) for k in range(t.shape[0])])
@@ -326,17 +327,32 @@ class LinInterpPathsSpace(PathsSpace):
     def baseline_image(self):
         return self.baseline
 
+class BlurPyramidSigmaInterp(Enum):
+    Linear=0
+    Logarithmic=1
+
 class BlurPyramidPathsSpace(PathsSpace):
     """A space/pertubation in which mask-values correspond to how strongly
     each region of the image is blurred out. In other words, this is a lowpass
     filter with position-dependent cutoff. It corresponds to the
     `BLUR_PERTURBATION` option of the TorchRay `Pertubation` class."""
-    def __init__(self, x, num_levels=8, max_blur=20):
+    def __init__( self, x, num_levels=8, max_blur=20, min_blur=0
+                , sigma_interp=BlurPyramidSigmaInterp.Linear ):
         nCh,h,w = x.shape[-3:]
         self.x = x.reshape(nCh,h,w)
+
+        if sigma_interp is BlurPyramidSigmaInterp.Logarithmic and min_blur==0:
+            min_blur = max_blur / 2**(num_levels/2)
+
+        σ_interp = {
+            BlurPyramidSigmaInterp.Linear:
+                lambda η: min_blur + η*(max_blur-min_blur)
+          , BlurPyramidSigmaInterp.Logarithmic:
+                lambda η: min_blur * np.exp(η*np.log(max_blur/min_blur))
+          }[sigma_interp]
+            
         self.pyramid = torch.cat(
-              [ apply_filter( self.x.unsqueeze(0)
-                               , float(1-s)*max_blur )
+              [ apply_filter( self.x.unsqueeze(0), σ_interp(float(1-s)) )
                for s in torch.linspace(0, 1, num_levels) ]
             , dim=0 ).flip(0)
         self.pyramid.requires_grad = False
@@ -461,11 +477,37 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
 
     return float(intg_score)
 
-
 def saturated_masks(φ, saturation):
+    saturation = saturation + 1e-6 # Avoid NaN from zero saturation
+                                   # causing 0/0 division.
     return (torch.tanh( (φ*2 - torch.ones_like(φ))*saturation )
-                          / (np.tanh(saturation))
+                          / (torch.tanh(torch.tensor(saturation)))
                        + torch.ones_like(φ))/2
+
+class SaturationAdjustment(ABC):
+    @abstractmethod
+    def adjust_mask_saturation(self, masks: torch.Tensor, i_optstep: int):
+        raise NotImplementedError
+
+class SaturationBoost(SaturationAdjustment):
+    def __init__(self, saturation: float):
+        self.saturation = saturation
+    def adjust_mask_saturation(self, masks, i_optstep):
+        return saturated_masks(masks, self.saturation)
+
+class StepcountDepSaturationAdjustment(SaturationAdjustment):
+    def __init__(self, sdep_adj: Callable[[int], SaturationAdjustment]):
+        self.sdep_adj = sdep_adj
+    def adjust_mask_saturation(self, masks, i_optstep):
+        return self.sdep_adj(i_optstep
+                  ).adjust_mask_saturation(masks, i_optstep)
+
+class BorderVanish_SaturationBoost(SaturationAdjustment):
+    def __init__(self, saturation: float):
+        self.saturation = saturation
+    def adjust_mask_saturation(self, masks, i_optstep):
+        saturation_window = bordervanish_window(masks)
+        return saturated_masks(masks, self.saturation*saturation_window)
 
 def path_optimisation_sequence (
           model, pathspaces, path_steps, optstep
@@ -494,8 +536,12 @@ def path_optimisation_sequence (
             momentum = ( momentum * momentum_inertia
                         + (pth - old_pth)*(1-momentum_inertia) )
             pth = old_pth + momentum
-        if saturation>0:
+
+        if isinstance(saturation, SaturationAdjustment):
+            pth = saturation.adjust_mask_saturation(pth, i)
+        elif isinstance(saturation, Number) and saturation>0:
             pth = saturated_masks(pth,saturation)
+
         def filterWith(σ):
             if ablmask_resolution is not None:
                 scale_factor = np.sqrt( np.product(ablmask_resolution)
