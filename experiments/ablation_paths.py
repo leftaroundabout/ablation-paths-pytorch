@@ -457,6 +457,7 @@ def mk_suitable_label(label_nr, model, x, baseline=None):
 
 class GradEstimation_Strategy(Enum):
     autodiff_grad = 0
+    jitterstochastic_finite_diff = 1
 
 def gradientMove_ablation_path( model, pathspace, abl_seq
                               , optstep
@@ -533,16 +534,34 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                       ) * (2 if objective is AblPathObjective.FwdRetaining_BwdDissipating
                             else 1)
  
-        # Gradient of the integral-score, as a function of the entire mask-path;
-        # in shape of its oversampled form.
-        grad = torch.autograd.grad( intg_score
-                                  , quantized_abl_seq )[0][:,0]
- 
-        grad = gradients_postproc(grad)
+        if grad_estim_strategy is GradEstimation_Strategy.autodiff_grad:
+            # Gradient of the integral-score, as a function of the entire mask-path;
+            # in shape of its oversampled form.
+            grad = torch.autograd.grad( intg_score
+                                      , quantized_abl_seq )[0][:,0]
+           
+            grad = gradients_postproc(grad)
+            
+            return intg_score, grad
         
-        return intg_score, grad
+        else:
+            return quantized_relimited, intg_score
 
-    intg_score, grad = evalmodel_quantizedmasked()
+    if grad_estim_strategy is GradEstimation_Strategy.autodiff_grad:
+        intg_score, grad = evalmodel_quantizedmasked()
+    elif grad_estim_strategy is GradEstimation_Strategy.jitterstochastic_finite_diff:
+        with torch.no_grad():
+            q0, intg_score0 = evalmodel_quantizedmasked()
+            q1, intg_score1 = evalmodel_quantizedmasked()
+            distance = torch.linalg.vector_norm(q1 - q0)**2
+            if not (distance > 0):
+                print(q0)
+                print(q1)
+                raise ZeroDivisionError(f"{distance=}")
+            grad = (q1 - q0)[:,0] * (intg_score1 - intg_score0) / distance
+        intg_score = (intg_score0 + intg_score1) / 2
+    else:
+        raise ValueError(f"Unknown gradient-estimation strategy {grad_estim_strategy}")
 
     if optstep is None:
         raise NotImplementedError("Automatic opt-step selection")
@@ -550,7 +569,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
         update = grad * optstep
     elif isinstance(optstep, OptstepStrategy):
         update = grad * optstep.factor_for_update(grad)
-    assert(update.shape==(nSq, *img_shape))
+    assert(update.shape==(nSq, *img_shape)), f"{update.shape} != {(nSq, *img_shape)}"
     
     resampled_abl_seq = range_remapping.to_unitinterval(
                 delimited_abl_seq[:,0] + update
