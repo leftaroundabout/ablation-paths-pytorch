@@ -450,6 +450,9 @@ def mk_suitable_label(label_nr, model, x, baseline=None):
         label_nr = torch.argmax(model(baseline.unsqueeze(0)))
     return label_nr
 
+class GradEstimation_Strategy(Enum):
+    autodiff_grad = 0
+
 def gradientMove_ablation_path( model, pathspace, abl_seq
                               , optstep
                               , objective=AblPathObjective.FwdLongestRetaining
@@ -458,6 +461,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                               , gradients_postproc=lambda gs: gs
                               , range_remapping = IdentityRemapping()
                               , mask_jitter = NOPMaskJitter()
+                              , grad_estim_strategy = GradEstimation_Strategy.autodiff_grad
                               ):
     nSq = abl_seq.shape[0]
     mask_shape = abl_seq.shape[1:]
@@ -483,49 +487,55 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
     assert(pointwise_scalar_product
       ), "Optimising without pointwise scalar product currently not supported."
 
-    quantized_abl_seq = mask_jitter.jitter_mask(delimited_abl_seq)
+    def evalmodel_quantizedmasked():
+        quantized_abl_seq = mask_jitter.jitter_mask(delimited_abl_seq)
 
-    quantized_abl_seq.requires_grad = True
+        if grad_estim_strategy is GradEstimation_Strategy.autodiff_grad:
+            quantized_abl_seq.requires_grad = True
 
-    argument = pathspace.apply_mask_seq(
-                           { AblPathObjective.FwdLongestRetaining:
-                                lambda rabs: rabs
-                           , AblPathObjective.BwdQuickestDissipating:
-                                lambda rabs: 1-rabs
-                           , AblPathObjective.FwdRetaining_BwdDissipating:
-                                lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
-                           }[objective]
-                            (range_remapping.to_unitinterval(quantized_abl_seq))
-                   )
+        argument = pathspace.apply_mask_seq(
+                               { AblPathObjective.FwdLongestRetaining:
+                                    lambda rabs: rabs
+                               , AblPathObjective.BwdQuickestDissipating:
+                                    lambda rabs: 1-rabs
+                               , AblPathObjective.FwdRetaining_BwdDissipating:
+                                    lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
+                               }[objective]
+                                (range_remapping.to_unitinterval(quantized_abl_seq))
+                       )
+ 
+        n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
+                               else nSq )
+        n_negative_weighted = ( 0 if objective is AblPathObjective.FwdLongestRetaining
+                               else nSq )
+ 
+        model_result = model(argument)
+        n_evals, n_classes = model_result.shape[:2]
+        assert(n_evals == n_positive_weighted+n_negative_weighted
+              ), f"{n_positive_weighted=}, {n_negative_weighted=}, {n_evals=}"
+ 
+        # Ablation path score, computed as the "integral": average of the
+        # target-class probability over the path. Backward-dissipating contributions
+        # are weighed negatively.
+        intg_score = torch.mean(
+                        torch.softmax(model_result.reshape(n_evals,n_classes), -1)
+                                           [:, label_nr]
+                       * torch.tensor([1 for _ in range(n_positive_weighted)]
+                                      + [-1 for _ in range(n_negative_weighted)] )
+                              .to(abl_seq.device)
+                      ) * (2 if objective is AblPathObjective.FwdRetaining_BwdDissipating
+                            else 1)
+ 
+        # Gradient of the integral-score, as a function of the entire mask-path;
+        # in shape of its oversampled form.
+        grad = torch.autograd.grad( intg_score
+                                  , quantized_abl_seq )[0][:,0]
+ 
+        grad = gradients_postproc(grad)
+        
+        return intg_score, grad
 
-    n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
-                           else nSq )
-    n_negative_weighted = ( 0 if objective is AblPathObjective.FwdLongestRetaining
-                           else nSq )
-
-    model_result = model(argument)
-    n_evals, n_classes = model_result.shape[:2]
-    assert(n_evals == n_positive_weighted+n_negative_weighted
-          ), f"{n_positive_weighted=}, {n_negative_weighted=}, {n_evals=}"
-
-    # Ablation path score, computed as the "integral": average of the
-    # target-class probability over the path. Backward-dissipating contributions
-    # are weighed negatively.
-    intg_score = torch.mean(
-                    torch.softmax(model_result.reshape(n_evals,n_classes), -1)
-                                       [:, label_nr]
-                   * torch.tensor([1 for _ in range(n_positive_weighted)]
-                                  + [-1 for _ in range(n_negative_weighted)] )
-                          .to(abl_seq.device)
-                  ) * (2 if objective is AblPathObjective.FwdRetaining_BwdDissipating
-                        else 1)
-
-    # Gradient of the integral-score, as a function of the entire mask-path;
-    # in shape of its oversampled form.
-    grad = torch.autograd.grad( intg_score
-                              , quantized_abl_seq )[0][:,0]
-
-    grad = gradients_postproc(grad)
+    intg_score, grad = evalmodel_quantizedmasked()
 
     if optstep is None:
         raise NotImplementedError("Automatic opt-step selection")
