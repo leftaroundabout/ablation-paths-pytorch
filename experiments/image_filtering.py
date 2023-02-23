@@ -30,7 +30,7 @@ import torch.fft
 
 import odl
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from enum import Enum
 
 def img_fft(image):
@@ -109,8 +109,15 @@ def apply_sobolevdualproj_filter(image, scale):
         raise TypeError("Supports only odl.DiscretisedSpaceElement, numpy.ndarray and torch.Tensor")
 
 class AbstractFilteringConfig(ABC):
+    @abstractmethod
     def rescaled(scl_factor):
-        return NotImplemented
+        raise NotImplementedError
+
+class NOPFilteringConfig(AbstractFilteringConfig):
+    def __init__(self):
+        pass
+    def rescaled(self, scl_factor):
+        return self
 
 class LowpassFilterType(Enum):
     Gaussian=1
@@ -159,7 +166,9 @@ class FilteringConfig(AbstractFilteringConfig):
                   = [ftr.rescaled(scl_factor) for ftr in self.filters_pipeline])
 
 def apply_filter(image, ftr_conf=6):
-    if isinstance(ftr_conf, LowpassFilteringConfig):
+    if isinstance(ftr_conf, NOPFilteringConfig):
+        return image
+    elif isinstance(ftr_conf, LowpassFilteringConfig):
         return {
        LowpassFilterType.Gaussian: lambda img:
           apply_gaussian_filter(img, ftr_conf.sigma)

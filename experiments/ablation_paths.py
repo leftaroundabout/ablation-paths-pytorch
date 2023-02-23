@@ -22,13 +22,13 @@ import torch
 import odl
 from monotone_paths import project_monotone_lInftymin, IntegrationOperator
 from ablation import compute_square_intensity
-from image_filtering import apply_filter, FilteringConfig, LowpassFilterType
+from image_filtering import apply_filter, FilteringConfig, LowpassFilterType, NOPFilteringConfig
 from imagenet_loading import load_single_image
 from itertools import count
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Callable, Optional
 from numbers import Number
 
 def all_indices(t):
@@ -383,6 +383,73 @@ class BlurPyramidPathsSpace(PathsSpace):
     def baseline_image(self):
         return self.pyramid[0]
 
+class MaskJitter(ABC):
+    """This class applies a modification to a mask-path, possibly
+    involving a random-generator state change. Unlike with `RangeRemapping`,
+    the modification is not undone after model evaluation in order to
+    perform a gradient-descent step; instead the gradients on the modified form
+    are simply applied to the state in its original form.
+    This is reasonable if the modification only applied a constant or
+    independently-random offset to the signal. The intended purpose is
+    to inject stochasticity and/or quantize the mask values that actually
+    appear for the interpolation routine."""
+    @abstractmethod
+    def jitter_mask(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+class NOPMaskJitter(MaskJitter):
+    def __init__(self):
+        pass
+    def jitter_mask(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        return abl_seq
+
+class GaussianJitter(MaskJitter):
+    def __init__( self, jitter_stdvar: float = 0.5
+                      , jitter_filtering: FilteringConfig = NOPFilteringConfig()
+                      , rng: Optional[torch.Generator] = None ):
+        self.jitter_stdvar = jitter_stdvar
+        self.jitter_filtering = jitter_filtering
+        self.rng = rng
+        if rng is None:
+            self.rng = torch.Generator()
+            self.rng.manual_seed(17584640331630194775)
+        else:
+            self.rng = rng
+    def jitter_mask(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        disturbance = apply_filter( torch.normal( 0.0, 1.0, size=abl_seq.shape
+                                                , generator=self.rng, requires_grad=False
+                                                ).to(abl_seq.device)
+                                  , self.jitter_filtering )
+        disturbance_norm = float(torch.linalg.vector_norm(disturbance))
+        return abl_seq + disturbance * (self.jitter_stdvar / disturbance_norm)
+
+class HardQuantizedMasks(MaskJitter):
+    def __init__( self, prejitter: MaskJitter = NOPMaskJitter()
+                      , quantize_threshold: Optional[Number] = 0.5
+                      , rng: Optional[torch.Generator] = None ):
+        self.prejitter = prejitter
+        self.quantize_threshold = quantize_threshold
+        self.rng = rng
+    def jitter_mask(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        jittered = self.prejitter.jitter_mask(abl_seq)
+        if isinstance(self.quantize_threshold, Number):
+            threshold = self.quantize_threshold
+        elif isinstance(self.rng, torch.Generator):
+            threshold = torch.rand(abl_seq.shape, generator=self.rng
+                          ) + self.quantize_threshold - 0.5
+        threshold = self.quantize_threshold
+        jittered[jittered<threshold] = 0
+        jittered[jittered>0] = 1
+        return jittered
+
+def mk_suitable_label(label_nr, model, x, baseline=None):
+    if label_nr is None:
+        label_nr = torch.argmax(model(x.unsqueeze(0)))
+    elif label_nr=='baseline_label':
+        assert(baseline is not None)
+        label_nr = torch.argmax(model(baseline.unsqueeze(0)))
+    return label_nr
+
 def gradientMove_ablation_path( model, pathspace, abl_seq
                               , optstep
                               , objective=AblPathObjective.FwdLongestRetaining
@@ -390,6 +457,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                               , pointwise_scalar_product=True
                               , gradients_postproc=lambda gs: gs
                               , range_remapping = IdentityRemapping()
+                              , mask_jitter = NOPMaskJitter()
                               ):
     nSq = abl_seq.shape[0]
     mask_shape = abl_seq.shape[1:]
@@ -400,11 +468,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
 
     needs_resampling = mask_shape != img_shape
 
-    if label_nr is None:
-        label_nr = torch.argmax(model(x.unsqueeze(0)))
-    elif label_nr=='baseline_label':
-        label_nr = torch.argmax(model(baseline.unsqueeze(0)))
-
+    label_nr = mk_suitable_label(label_nr, model, x, baseline)
 
     # Suitably reshaped and resampled version of mask, for applying (with
     # auto-broadcast channel dimension) to target- and baseline images.
@@ -419,7 +483,9 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
     assert(pointwise_scalar_product
       ), "Optimising without pointwise scalar product currently not supported."
 
-    delimited_abl_seq.requires_grad = True
+    quantized_abl_seq = mask_jitter.jitter_mask(delimited_abl_seq)
+
+    quantized_abl_seq.requires_grad = True
 
     argument = pathspace.apply_mask_seq(
                            { AblPathObjective.FwdLongestRetaining:
@@ -429,7 +495,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                            , AblPathObjective.FwdRetaining_BwdDissipating:
                                 lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
                            }[objective]
-                            (range_remapping.to_unitinterval(delimited_abl_seq))
+                            (range_remapping.to_unitinterval(quantized_abl_seq))
                    )
 
     n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
@@ -457,7 +523,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
     # Gradient of the integral-score, as a function of the entire mask-path;
     # in shape of its oversampled form.
     grad = torch.autograd.grad( intg_score
-                              , delimited_abl_seq )[0][:,0]
+                              , quantized_abl_seq )[0][:,0]
 
     grad = gradients_postproc(grad)
 
