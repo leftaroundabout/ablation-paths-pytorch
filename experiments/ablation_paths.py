@@ -424,6 +424,11 @@ class GaussianJitter(MaskJitter):
         return abl_seq + disturbance * (self.jitter_stdvar / disturbance_norm)
 
 class HardQuantizedMasks(MaskJitter):
+    """Take masks as _probabiliies_ (i.e. floats in range 0 to 1)
+    and yield boolean masks. If `rng` is provided, the boolean values
+    will be random, namely 1 with probability corresponding to the float
+    value contained in the original mask. If no generator is provided,
+    simply all values below 0.5 are pulled to 0, all above 0.5 to 1."""
     def __init__( self, prejitter: MaskJitter = NOPMaskJitter()
                       , quantize_threshold: Optional[Number] = 0.5
                       , rng: Optional[torch.Generator] = None ):
@@ -431,13 +436,13 @@ class HardQuantizedMasks(MaskJitter):
         self.quantize_threshold = quantize_threshold
         self.rng = rng
     def jitter_mask(self, abl_seq: torch.Tensor) -> torch.Tensor:
-        jittered = self.prejitter.jitter_mask(abl_seq)
-        if isinstance(self.quantize_threshold, Number):
+        jittered = self.prejitter.jitter_mask(abl_seq).clone().detach()
+        if self.rng is None:
             threshold = self.quantize_threshold
-        elif isinstance(self.rng, torch.Generator):
-            threshold = torch.rand(abl_seq.shape, generator=self.rng
-                          ) + self.quantize_threshold - 0.5
-        threshold = self.quantize_threshold
+        else:
+            threshold = ( self.quantize_threshold
+                         + torch.rand(abl_seq.shape, generator=self.rng)
+                         - 0.5 ).to(abl_seq.device)
         jittered[jittered<threshold] = 0
         jittered[jittered>0] = 1
         return jittered
@@ -493,6 +498,8 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
         if grad_estim_strategy is GradEstimation_Strategy.autodiff_grad:
             quantized_abl_seq.requires_grad = True
 
+        quantized_relimited = range_remapping.to_unitinterval(quantized_abl_seq)
+
         argument = pathspace.apply_mask_seq(
                                { AblPathObjective.FwdLongestRetaining:
                                     lambda rabs: rabs
@@ -501,7 +508,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                                , AblPathObjective.FwdRetaining_BwdDissipating:
                                     lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
                                }[objective]
-                                (range_remapping.to_unitinterval(quantized_abl_seq))
+                                (quantized_relimited)
                        )
  
         n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
