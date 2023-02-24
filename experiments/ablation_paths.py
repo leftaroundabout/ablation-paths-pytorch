@@ -404,10 +404,10 @@ class NOPMaskJitter(MaskJitter):
         return abl_seq
 
 class GaussianJitter(MaskJitter):
-    def __init__( self, jitter_stdvar: float = 0.5
+    def __init__( self, jitter_stddev: float = 0.5
                       , jitter_filtering: FilteringConfig = NOPFilteringConfig()
                       , rng: Optional[torch.Generator] = None ):
-        self.jitter_stdvar = jitter_stdvar
+        self.jitter_stddev = jitter_stddev
         self.jitter_filtering = jitter_filtering
         self.rng = rng
         if rng is None:
@@ -420,8 +420,9 @@ class GaussianJitter(MaskJitter):
                                                 , generator=self.rng, requires_grad=False
                                                 ).to(abl_seq.device)
                                   , self.jitter_filtering )
-        disturbance_norm = float(torch.linalg.vector_norm(disturbance))
-        return abl_seq + disturbance * (self.jitter_stdvar / disturbance_norm)
+        disturbance_norm = np.sqrt(
+           float(torch.sum(disturbance**2)/len(torch.flatten(abl_seq))) )
+        return abl_seq + disturbance * (self.jitter_stddev / disturbance_norm)
 
 class HardQuantizedMasks(MaskJitter):
     """Take masks as _probabiliies_ (i.e. floats in range 0 to 1)
