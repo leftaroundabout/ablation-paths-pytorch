@@ -542,7 +542,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
                          , pathspace=None
                          , model=None, labels=None
                          , x_to_image=lambda ξ: ξ
-                         , abl_to_mask=lambda μ: μ
+                         , abl_to_saliency=lambda μ,ξ: μ
                          , view_x=DeemphasizeIrrelevant()
                          , view_masks=False, view_interpolation=auto, view_classification=auto
                          , view_scoregraph=False
@@ -593,16 +593,17 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
                            for ooc in [lambda abls: abls, lambda abls: 1-abls] ] )
     n_tested = abl_seq_wEndpoints.shape[0]
 
-    if ( True or add_overlay_mask_as_hue
-            or isinstance(view_x, MaskViewOverlay)
-            or add_overlay_mask_contours ):
-        masks_seq = torch.stack([abl_to_mask(abl_seq_wEndpoints[i])
-                                          for i in range(abl_seq_wEndpoints.shape[0])])
-
     interpol_seq = masked_interpolation(pathspace=pathspace, abl_seq=abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
     interpol_seq_imgs = torch.stack([to_unit_range(x_to_image(interpol_seq[i]))
                                           for i in range(interpol_seq.shape[0])])
+
+    if ( True or add_overlay_mask_as_hue
+            or isinstance(view_x, MaskViewOverlay)
+            or add_overlay_mask_contours ):
+        masks_seq = torch.stack([abl_to_saliency(abl_seq_wEndpoints[i], interpol_seq[i])
+                                          for i in range(abl_seq_wEndpoints.shape[0])])
+
     if add_overlay_mask_as_hue:
         overlay_enable_select = pn.widgets.Checkbox(name='Mask as hue overlay', value=True)
         interpol_seq_maskhint = torch.stack(

@@ -310,6 +310,7 @@ class PathsSpace(ABC):
     @abstractmethod
     def baseline_image(self):
         raise NotImplementedError
+    @property
     @abstractmethod
     def ablmask_shape(self):
         raise NotImplementedError
@@ -320,6 +321,7 @@ class LinInterpPathsSpace(PathsSpace):
         self.x = x
         self.baseline = baseline
         self.difference = baseline - x
+    @property
     def ablmask_shape(self):
         return self.x.shape[1:]
     def apply_mask_seq(self, abl_seq: torch.Tensor):
@@ -365,6 +367,7 @@ class BlurPyramidPathsSpace(PathsSpace):
             , dim=0 ).flip(0)
         self.pyramid.requires_grad = False
 
+    @property
     def ablmask_shape(self):
         return self.x.shape
 
@@ -486,16 +489,15 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
     x = pathspace.target_image
     baseline = pathspace.baseline_image
     nCh = x.shape[0]
-    img_shape = x.shape[1:]
 
-    needs_resampling = mask_shape != img_shape
+    needs_resampling = mask_shape != pathspace.ablmask_shape
 
     label_nr = mk_suitable_label(label_nr, model, x, baseline)
 
     # Suitably reshaped and resampled version of mask, for applying (with
     # auto-broadcast channel dimension) to target- and baseline images.
     resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq, 1, *mask_shape)
-                                        , img_shape
+                                        , pathspace.ablmask_shape
                                         )
 
     # If given a suitable remapping function, use it for a representation
@@ -581,7 +583,8 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
         update = grad * optstep
     elif isinstance(optstep, OptstepStrategy):
         update = grad * optstep.factor_for_update(grad)
-    assert(update.shape==(nSq, *img_shape)), f"{update.shape} != {(nSq, *img_shape)}"
+    assert(update.shape==(nSq, *pathspace.ablmask_shape)
+          ), f"{update.shape} != {(nSq, *pathspace.ablmask_shape)}"
     
     resampled_abl_seq = range_remapping.to_unitinterval(
                 delimited_abl_seq[:,0] + update
@@ -630,10 +633,11 @@ def path_optimisation_sequence (
         , pathrepairer=repair_ablation_path
         , momentum_inertia=0
         , **kwargs ):
-    x_example = pathspaces().target_image
+    example_pathspace = pathspaces()
+    x_example = example_pathspace.target_image
     img_shape = x_example.shape[1:]
     if ablmask_resolution is None:
-        ablmask_resolution = img_shape
+        ablmask_resolution = example_pathspace.ablmask_shape
     pth = ( torch.stack([p*torch.ones(ablmask_resolution)
                          for p in np.linspace(0,1,path_steps)[1:-1]])
                    .to(x_example.device)
@@ -784,16 +788,16 @@ def masked_interpolation(x=None, baseline=None, abl_seq=None, pathspace=None, in
         x = pathspace.target_image
         baseline = pathspace.baseline_image
 
-    needs_resampling = x.shape[1:] != abl_seq.shape[1:]
+    needs_resampling = pathspace.ablmask_shape != abl_seq.shape[1:]
     if type(abl_seq) != torch.Tensor:
         abl_seq = torch.stack(list(abl_seq))
     xOpt = x.to(abl_seq.device)
     nSq = abl_seq.shape[0]
     mask_shape = abl_seq.shape[1:]
     nCh = x.shape[0]
-    img_shape = x.shape[1:]
 
-    rspl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape
+    rspl_seq = resample_to_reso( abl_seq.reshape(nSq, 1, *mask_shape)
+                               , pathspace.ablmask_shape
                 ) if needs_resampling else abl_seq
 
     if include_endpoints:
