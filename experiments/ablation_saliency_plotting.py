@@ -522,6 +522,8 @@ intuitive_saliency_mask_combo_img_views = [
 def interactive_view_mask( abl_seq, x=None, baseline=None
                          , pathspace=None
                          , model=None, labels=None
+                         , x_to_image=lambda ξ: ξ
+                         , abl_to_mask=lambda μ: μ
                          , view_x=DeemphasizeIrrelevant()
                          , view_masks=False, view_interpolation=auto, view_classification=auto
                          , view_scoregraph=False
@@ -571,29 +573,37 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
                                            , torch.ones_like(abl_seq[0:1]) ] ))
                            for ooc in [lambda abls: abls, lambda abls: 1-abls] ] )
     n_tested = abl_seq_wEndpoints.shape[0]
+
+    if ( True or add_overlay_mask_as_hue
+            or isinstance(view_x, MaskViewOverlay)
+            or add_overlay_mask_contours ):
+        masks_seq = torch.stack([abl_to_mask(abl_seq_wEndpoints[i])
+                                          for i in range(abl_seq_wEndpoints.shape[0])])
+
     interpol_seq = masked_interpolation(pathspace=pathspace, abl_seq=abl_seq_wEndpoints
          ) if view_interpolation or view_classification else None
-    interpol_seq_normrng = torch.stack([to_unit_range(interpol_seq[i])
+    interpol_seq_imgs = torch.stack([to_unit_range(x_to_image(interpol_seq[i]))
                                           for i in range(interpol_seq.shape[0])])
     if add_overlay_mask_as_hue:
+        overlay_enable_select = pn.widgets.Checkbox(name='Mask as hue overlay', value=True)
         interpol_seq_maskhint = torch.stack(
                                  [ overlay_mask_as_hue
-                                           ( interpol_seq_normrng[i], abl_seq_wEndpoints[i] )
+                                           ( interpol_seq_imgs[i], masks_seq[i] )
                                    for i in range(n_tested) ] )
     else:
-        interpol_seq_maskhint = interpol_seq_normrng
-    if view_x is True:
+        interpol_seq_maskhint = interpol_seq_imgs
+    if view_x:
         x_view_seq = [ x for i in range(n_tested) ]
         do_x_view = True
-    elif isinstance(view_x, MaskViewOverlay):
-        x_view_seq = [ view_x( to_unit_range(x), abl_seq_wEndpoints[i] )
-                                   for i in range(n_tested) ]
-        do_x_view = True
+        if isinstance(view_x, MaskViewOverlay):
+            x_maskovlyd_view_seq = [ view_x( to_unit_range(x_to_image(x))
+                                           , masks_seq[i] )
+                                       for i in range(n_tested) ]
     else:
         do_x_view = False
     if add_overlay_mask_contours:
         interpol_seq_contours = [ overlay_mask_contours
-                                           ( interpol_seq_maskhint[i], abl_seq_wEndpoints[i]
+                                           ( interpol_seq_maskhint[i], masks_seq[i]
                                            , contour_colour=torch.tensor([1,-1,-0.5]) )
                                    for i in range(n_tested) ]
         interpol_seq_maskhint = interpol_seq_contours
@@ -618,10 +628,10 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
     def hvRGB(y):
         return hv.RGB((y.transpose(1,2).transpose(0,2).cpu().numpy() + 1)/2
                       ).opts(**hvopts_img)
-    def show_intermediate( complement, i
+    def show_intermediate( complement, i, mask_overlay_enabled=False
                          , enable_scoregraph=True, enable_others=True ):
         c = n_ablseq+2 if complement else 0
-        intensity = abl_seq_wEndpoints[c+i].cpu().numpy()
+        intensity = masks_seq[c+i].cpu().numpy()
         views = []
         if do_x_view:
             xview_img = x_view_seq[c+i]
@@ -631,7 +641,8 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
             maskview = hv.Image(intensity).opts(**hvopts).redim.range(z=(1,0))
             views = views + [maskview]
         if view_interpolation and enable_others:
-            interpol_img = interpol_seq_maskhint[c+i]
+            interpol_img = ( interpol_seq_maskhint[c+i] if mask_overlay_enabled
+                              else interpol_seq_imgs[c+i] )
             interpolview = hvRGB(interpol_img)
             views = views + [interpolview]
         if view_classification and enable_others:
@@ -665,10 +676,20 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
 
         return views
     if view_scoregraph:
-        return pn.Column( pn.Row(complement_select, inter_select)
-                        , pn.depends(complement_select.param.value, inter_select.param.value)
-                                    (lambda cp,i: hv.Layout(show_intermediate(
-                                                      cp, i, enable_scoregraph=False)))
+        return pn.Column( pn.Row( pn.Column( complement_select
+                                           , *([overlay_enable_select]
+                                               if add_overlay_mask_as_hue
+                                               else []) )
+                                , inter_select )
+                        , pn.depends( complement_select.param.value, inter_select.param.value
+                                       , *([overlay_enable_select.param.value]
+                                             if add_overlay_mask_as_hue else []) )
+                                    ( (lambda cp,i,oes: hv.Layout(show_intermediate(
+                                                            cp, i, mask_overlay_enabled=oes
+                                                          , enable_scoregraph=False)))
+                                      if add_overlay_mask_as_hue else 
+                                      (lambda cp,i: hv.Layout(show_intermediate(
+                                                      cp, i, enable_scoregraph=False))) )
                         , pn.depends(complement_select.param.value, inter_select.param.value)
                                     (lambda cp,i: hv.Layout(show_intermediate(
                                                       cp, i, enable_others=False)))
