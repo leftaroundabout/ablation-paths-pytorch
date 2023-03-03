@@ -310,6 +310,9 @@ class PathsSpace(ABC):
     @abstractmethod
     def baseline_image(self):
         raise NotImplementedError
+    @abstractmethod
+    def ablmask_shape(self):
+        raise NotImplementedError
 
 class LinInterpPathsSpace(PathsSpace):
     def __init__(self, x, baseline):
@@ -317,8 +320,13 @@ class LinInterpPathsSpace(PathsSpace):
         self.x = x
         self.baseline = baseline
         self.difference = baseline - x
+    def ablmask_shape(self):
+        return self.x.shape[1:]
     def apply_mask_seq(self, abl_seq: torch.Tensor):
-        assert(abl_seq.shape[1]==1 and self.x.shape[1:] == abl_seq.shape[2:])
+        if abl_seq.shape<=self.x.shape:
+            abl_seq = abl_seq.unsqueeze(1)
+        assert(abl_seq.shape[1]==1 and self.x.shape[1:] == abl_seq.shape[2:]
+              ), f"{abl_seq.shape=}, {self.x.shape=}"
         return self.x + self.difference * abl_seq
     @property
     def target_image(self):
@@ -356,6 +364,9 @@ class BlurPyramidPathsSpace(PathsSpace):
                for s in torch.linspace(0, 1, num_levels) ]
             , dim=0 ).flip(0)
         self.pyramid.requires_grad = False
+
+    def ablmask_shape(self):
+        return self.x.shape
 
     def apply_mask_seq(self, abl_seq: torch.Tensor):
         # Adapted from TorchRay,
@@ -782,7 +793,8 @@ def masked_interpolation(x=None, baseline=None, abl_seq=None, pathspace=None, in
     nCh = x.shape[0]
     img_shape = x.shape[1:]
 
-    rspl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape)
+    rspl_seq = resample_to_reso(abl_seq.reshape(nSq, 1, *mask_shape), img_shape
+                ) if needs_resampling else abl_seq
 
     if include_endpoints:
         rspl_seq = torch.concat( [ torch.zeros_like(rspl_seq[0]).unsqueeze(0)
@@ -792,16 +804,21 @@ def masked_interpolation(x=None, baseline=None, abl_seq=None, pathspace=None, in
 
     return pathspace.apply_mask_seq(rspl_seq)
 
-def most_salient_mask_in_path( abl_seq, model, x, baseline
+def most_salient_mask_in_path( abl_seq, model, x=None, baseline=None, pathspace=None
                              , minimum_ablation_pos=0.25, label_nr=None
                              , fallback_to_best_scoring=True ):
     if len(abl_seq) <= 1:
         return 0
 
+    if pathspace is None:
+        pathspace = LinInterpPathsSpace(x, baseline)
+    else:
+        x = pathspace.target_image
+
     if label_nr is None:
         label_nr = torch.argmax(model(x.unsqueeze(0)))
 
-    predictions = model(masked_interpolation(x,baseline,abl_seq))
+    predictions = model(masked_interpolation(abl_seq=abl_seq, pathspace=pathspace))
     imax = len(abl_seq) - 1
     min_allowed_i = int(len(abl_seq) * minimum_ablation_pos)
     while imax>=min_allowed_i and torch.argmax(predictions[imax])!=label_nr:

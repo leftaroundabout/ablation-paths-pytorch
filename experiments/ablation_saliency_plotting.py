@@ -26,6 +26,8 @@ import matplotlib.ticker as mtick
 import matplotlib.gridspec as grid
 from matplotlib.colors import to_rgb
 
+from collections.abc import Iterable
+
 import panel as pn
 import holoviews as hv
 import pandas as pd
@@ -40,7 +42,10 @@ from ablation_paths import ( masked_interpolation
                            , LinInterpPathsSpace )
 from image_filtering import apply_gaussian_filter
 
-def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
+def mpplot_ablpath_score( model, x=None, baselines=None
+                        , abl_seqs=None
+                        , pathspaces=None
+                        , label_nr=None
                         , tgt_subplots=None, savename=None
                         , label_name=None, labels=None
                         , extras={}
@@ -48,11 +53,25 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
                         , classification_name=None
                         , include_endpoints=True
                         , objective=AblPathObjective.FwdLongestRetaining ):
-    if callable(baselines):
-        baseline_samples = [ baselines()
-                              for i in range(12) ]
+    assert(abl_seqs is not None)
+    if pathspaces is None:
+        assert(x is not None and baselines is not None)
+        pathspaces = (lambda: LinInterpPathsSpace(x, baselines())
+                     ) if callable(baselines) else [
+                      LinInterpPathsSpace(x, bl) for bl in baselines
+                     ] if isinstance(baselines, Iterable) else [
+                      LinInterpPathsSpace(x, baselines) ]
     else:
-        baseline_samples = baselines
+        assert(x is None and baselines is None)
+    if callable(pathspaces):
+        pathspace_samples = [ pathspaces()
+                              for i in range(12) ]
+    elif isinstance(pathspaces, Iterable):
+        pathspace_samples = pathspaces
+    else:
+        pathspace_samples = [pathspaces]
+    x = pathspace_samples[0].target_image
+
     if classification_name is None:
         if type(model) is TrainedTimmModel:
             classification_name = model.timm_model_name
@@ -70,10 +89,10 @@ def mpplot_ablpath_score( model, x, baselines, abl_seqs, label_nr=None
     def relevant_predictions():
         complete_classif, contrast_classif = [
                    {method: [ torch.softmax(model(
-                                 masked_interpolation( x, baseline, co(abl_seq)
+                                 masked_interpolation( abl_seq=co(abl_seq), pathspace=ps
                                                      , include_endpoints=include_endpoints )
                                             ), dim=1).detach()
-                                     for baseline in baseline_samples ]
+                                     for ps in pathspace_samples ]
                               for method, abl_seq in abl_series }
                  for co in [lambda abls: abls, lambda abls: 1-abls] ]
         return {**{ vis_class:
