@@ -86,9 +86,14 @@ def mpplot_ablpath_score( model, x=None, baselines=None
     if label_nr is None:
         label_nr = classif_top_label
 
+    def model_eval(xs):
+        with torch.no_grad():
+            ys = model(xs).detach().clone()
+        return ys
+
     def relevant_predictions():
         complete_classif, contrast_classif = [
-                   {method: [ torch.softmax(model(
+                   {method: [ torch.softmax(model_eval(
                                  masked_interpolation( abl_seq=co(abl_seq), pathspace=ps
                                                      , include_endpoints=include_endpoints )
                                             ), dim=1).detach()
@@ -628,7 +633,8 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
                                    for i in range(n_tested) ]
         interpol_seq_maskhint = interpol_seq_contours
     if view_classification or view_scoregraph:
-        classifications = model(interpol_seq.to(torchdevice)).detach().clone()
+        with torch.no_grad():
+            classifications = model(interpol_seq.to(torchdevice)).detach().clone()
         clshape = classifications.shape
         classifications = classifications.reshape(n_tested, clshape[1])
     if view_scoregraph:
