@@ -165,6 +165,13 @@ class FilteringConfig(AbstractFilteringConfig):
         return FilteringConfig(filters_pipeline
                   = [ftr.rescaled(scl_factor) for ftr in self.filters_pipeline])
 
+class ComplementaryFilteringConfig(AbstractFilteringConfig):
+    def __init__(self, opposite_filter: AbstractFilteringConfig):
+        self.opposite_filter = opposite_filter
+    def rescaled(self, scl_factor):
+        return ComplementaryFilteringConfig(
+                 opposite_filter = self.opposite_filter.rescaled(scl_factor))
+
 def apply_filter(image, ftr_conf=6):
     if isinstance(ftr_conf, NOPFilteringConfig):
         return image
@@ -188,6 +195,9 @@ def apply_filter(image, ftr_conf=6):
         for iftr in ftr_conf.filters_pipeline:
             image = apply_filter(image, iftr)
         return image
+    elif isinstance(ftr_conf, ComplementaryFilteringConfig):
+        ofiltrd = apply_filter(image, ftr_conf.opposite_filter)
+        return image - ofiltrd
     else:
         assert(isinstance(ftr_conf, numbers.Number)), f"{type(ftr_conf)}"
         return apply_filter(image
