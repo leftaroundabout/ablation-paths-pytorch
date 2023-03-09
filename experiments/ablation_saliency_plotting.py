@@ -253,10 +253,12 @@ def desaturate(y, saturation=0.3):
     return fromHSV(hsvI)
 
 def overlay_mask_as_hue(y, mask, y_saturation=0.3, y_prominence=1.0):
-    nCh, w, h = y.shape
+    nCh, h, w = y.shape
 
     # 0.7 is the hue of blue, 0 of red.
-    mask_hue = 0.7 * resample_to_reso(mask.unsqueeze(0), (w,h))
+    mask_hue = 0.7 * resample_to_reso(mask.unsqueeze(0), (h,w))
+    assert( mask_hue.shape==(1,h,w)
+          ), f"{mask.shape=}, {h=}, {w=}"
     
     spectral_mask_hsv = torch.ones_like(y)
     spectral_mask_hsv[0,:,:] = mask_hue
