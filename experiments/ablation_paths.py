@@ -63,15 +63,61 @@ def monotonise_ablationpath(abl_seq):
     else:
         raise ValueError("This function currently works only with Torch tensors, Numpy arrays or ODL DiscretizedSpace elements.")
 
-def reParamNormalise_ablation_speed(abl_seq):
+class PathsSpace(ABC):
+    """An abstract notion of what it means to interpolate along paths of
+    masks in order to obtain paths of images. Corresponds roughly to what
+    [Fong&Vedaldi 2017] call “pertubations”.
+    
+    The simplest such notion – linear interpolation from the target image
+    to a baseline – is captured by `LinInterpPathsSpace`."""
+    @abstractmethod
+    def apply_mask_seq(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+    @property
+    @abstractmethod
+    def target_image(self):
+        raise NotImplementedError
+    @property
+    @abstractmethod
+    def baseline_image(self):
+        raise NotImplementedError
+    @property
+    @abstractmethod
+    def ablmask_shape(self):
+        raise NotImplementedError
+    def differential_to_gradient(self, differential: torch.Tensor) -> torch.Tensor:
+        """ Given the dual vector that comes out of e.g. Torch autograd,
+        obtain the corresponding gradient as a vector that can be used as
+        an update in gradient-descent. This can be seen as incurring a
+        norm / inner product on the space of paths.
+        The default simply uses the differential itself, as is valid for
+        Euclidean spaces (which are self-dual). """
+        return differential
+    def mask_masses(self, abl_seq: torch.Tensor) -> np.ndarray:
+        return np.array([float(abl_seq[i].mean()) for i in range(abl_seq.shape[0])])
+
+class RangeRemapping(ABC):
+    @abstractmethod
+    def to_unitinterval(self, x):
+        return NotImplemented
+    @abstractmethod
+    def from_unitinterval(self, y):
+        return NotImplemented
+
+def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
+                                   , range_remapping: RangeRemapping
+                                   , accuracy: float =0.01
+                                   , max_interpfind_iters: int =200
+                                   , endpoint_limitε: float =1e-1 ):
     n = abl_seq.shape[0]
-    masses = np.array([0] + [float(abl_seq[i].mean()) for i in range(n)] + [1])
-    zeros_like = (torch.zeros_like
-           if type(abl_seq) is torch.Tensor
-            else np.zeros_like )
-    ones_like = (torch.ones_like
-           if type(abl_seq) is torch.Tensor
-            else np.ones_like )
+    uses_torch = isinstance(abl_seq, torch.Tensor)
+    zeros_like = (torch.zeros_like if uses_torch else np.zeros_like )
+    ones_like = (torch.ones_like if uses_torch else np.ones_like )
+    ablseq_wends = (torch.cat if uses_torch else np.concat
+            )([ (abl_seq[0]*endpoint_limitε)[None]
+              , abl_seq
+              , (1 - (1 - abl_seq[-1])*endpoint_limitε)[None] ])
+    masses = pathspace.mask_masses(ablseq_wends)
     result = zeros_like(abl_seq)
     il = 0
     ir = 1
@@ -80,24 +126,38 @@ def reParamNormalise_ablation_speed(abl_seq):
             ir+=1
         while il<ir-1 and masses[il+1]<m:
             il+=1
+        assert(masses[il] < m and masses[ir] > m
+              ), f"{m=}, {masses[il]=}, {masses[ir]=}"
         η = (m - masses[il]) / (masses[ir]-masses[il])
-        # print("m=%.2f, il=%i, mil=%.2f, ir=%i, mir=%.2f" % (m, il, masses[il], ir, masses[ir]))
-        φl = abl_seq[il-1] if il>0 else zeros_like(abl_seq[0])
-        φr = abl_seq[ir-1] if ir<=n else ones_like(abl_seq[0])
-        result[j] = φl + (φr-φl)*η
+        φl = ablseq_wends[il]
+        φlω = range_remapping.from_unitinterval(φl)
+        φr = ablseq_wends[ir]
+        φrω = range_remapping.from_unitinterval(φr)
+        def interpolation_point(τgl, τgr, iters=0):
+            τgm = (τgl+τgr)/2
+            φgmω = φlω + (φrω-φlω)*τgm
+            φgm = range_remapping.to_unitinterval(φgmω)
+            mgm = float(φgm.mean())
+            if abs(mgm-m) < accuracy or iters>max_interpfind_iters:
+                return φgm, mgm
+            elif m<mgm:
+                return interpolation_point(τgl, τgm, iters+1)
+            else:
+                return interpolation_point(τgm, τgr, iters+1)
+        result[j], mgm = interpolation_point(0,1)
     return result
 
 # Given a possibly invalid path of ablation-masks (i.e., one that may not be
 # pointwise monotone, in the allowed range [0,1], or speed-normalised),
 # return a path that is similar but does fulfill the conditions.
 # Note that the argument of this function is mutated.
-def repair_ablation_path(abl_seq):
+def repair_ablation_path(abl_seq, pathspace: PathsSpace, range_remapping: RangeRemapping):
     monotonise_ablationpath(abl_seq)
     if type(abl_seq) is torch.Tensor:
         torch.clamp(abl_seq, 0, 1, out=abl_seq)
-        return reParamNormalise_ablation_speed(abl_seq)
+        return reParamNormalise_ablation_speed(abl_seq, pathspace, range_remapping)
     elif type(abl_seq) is np.ndarray:
-        return reParamNormalise_ablation_speed(np.clip(abl_seq, 0, 1))
+        return reParamNormalise_ablation_speed(np.clip(abl_seq, 0, 1), pathspace, range_remapping)
     elif type(abl_seq) is odl.DiscretizedSpaceElement:
         abl_arr = abl_seq.asarray()
         return abl_seq.space.element(
@@ -183,14 +243,6 @@ def resample_to_reso(v, tgt_shape):
         return torch.nn.functional.interpolate( v, size=tgt_shape
                                               , mode='bilinear', align_corners=False )
         
-
-class RangeRemapping(ABC):
-    @abstractmethod
-    def to_unitinterval(self, x):
-        return NotImplemented
-    @abstractmethod
-    def from_unitinterval(self, y):
-        return NotImplemented
 
 class IdentityRemapping(RangeRemapping):
     def __init__(self):
@@ -291,29 +343,6 @@ class AblPathObjective(Enum):
     FwdLongestRetaining=0
     BwdQuickestDissipating=1
     FwdRetaining_BwdDissipating=2
-
-class PathsSpace(ABC):
-    """An abstract notion of what it means to interpolate along paths of
-    masks in order to obtain paths of images. Corresponds roughly to what
-    [Fong&Vedaldi 2017] call “pertubations”.
-    
-    The simplest such notion – linear interpolation from the target image
-    to a baseline – is captured by `LinInterpPathsSpace`."""
-    @abstractmethod
-    def apply_mask_seq(self, abl_seq: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-    @property
-    @abstractmethod
-    def target_image(self):
-        raise NotImplementedError
-    @property
-    @abstractmethod
-    def baseline_image(self):
-        raise NotImplementedError
-    @property
-    @abstractmethod
-    def ablmask_shape(self):
-        raise NotImplementedError
 
 class LinInterpPathsSpace(PathsSpace):
     def __init__(self, x, baseline):
@@ -632,6 +661,7 @@ def path_optimisation_sequence (
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
         , momentum_inertia=0
+        , range_remapping: RangeRemapping =IdentityRemapping()
         , **kwargs ):
     example_pathspace = pathspaces()
     x_example = example_pathspace.target_image
@@ -648,8 +678,10 @@ def path_optimisation_sequence (
     for i in count():
         if momentum_inertia>0:
             old_pth = pth.clone().detach()
+        pathspace = pathspaces()
         current_score = gradientMove_ablation_path(
-            model, pathspaces(), abl_seq=pth, optstep=optstep, **kwargs )
+              model, pathspace, abl_seq=pth, optstep=optstep
+            , range_remapping=range_remapping, **kwargs )
         if momentum_inertia>0:
             momentum = ( momentum * momentum_inertia
                         + (pth - old_pth)*(1-momentum_inertia) )
@@ -671,7 +703,7 @@ def path_optimisation_sequence (
             filterWith(filter_cfg(i))
         elif filter_cfg is not None:
             filterWith(filter_cfg)
-        pth = pathrepairer(pth)
+        pth = pathrepairer(pth, pathspace=pathspace, range_remapping=range_remapping)
         if momentum_inertia>0:
             momentum = pth - old_pth
         yield pth, current_score
