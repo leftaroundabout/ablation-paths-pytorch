@@ -93,8 +93,9 @@ class PathsSpace(ABC):
         The default simply uses the differential itself, as is valid for
         Euclidean spaces (which are self-dual). """
         return differential
-    def mask_masses(self, abl_seq: torch.Tensor) -> np.ndarray:
-        return np.array([float(abl_seq[i].mean()) for i in range(abl_seq.shape[0])])
+    def mask_masses(self, abl_seq: torch.Tensor) -> torch.Tensor:
+        n_mask_dims = len(self.ablmask_shape)
+        return abl_seq.mean(dim=tuple(range(-n_mask_dims,0)))
 
 class RangeRemapping(ABC):
     @abstractmethod
@@ -111,41 +112,50 @@ def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
                                    , endpoint_limitε: float =1e-1 ):
     n = abl_seq.shape[0]
     uses_torch = isinstance(abl_seq, torch.Tensor)
-    zeros_like = (torch.zeros_like if uses_torch else np.zeros_like )
-    ones_like = (torch.ones_like if uses_torch else np.ones_like )
+    zeros = (torch.zeros if uses_torch else np.zeros )
     ablseq_wends = (torch.cat if uses_torch else np.concat
             )([ (abl_seq[0]*endpoint_limitε)[None]
               , abl_seq
               , (1 - (1 - abl_seq[-1])*endpoint_limitε)[None] ])
     masses = pathspace.mask_masses(ablseq_wends)
-    result = zeros_like(abl_seq)
+    assert(masses.shape[0]==n+2)
+    batchdims = masses.shape[1:]
+    assert(ablseq_wends.shape[1 : 1+len(batchdims)]==batchdims
+          ), f"{ablseq_wends.shape=}, {batchdims=}"
+    mask_shape = ablseq_wends.shape[1+len(batchdims):]
+    assert(mask_shape==pathspace.ablmask_shape)
+    n_batches = np.product(batchdims) if len(batchdims)>0 else 1
+    masses = masses.reshape(n+2, n_batches)
+    ablseq_wends = ablseq_wends.reshape(n+2, n_batches, *mask_shape)
+    result = zeros((n,n_batches)+mask_shape).to(abl_seq.device)
     il = 0
     ir = 1
-    for j, m in enumerate(np.linspace(0, 1, n+2)[1:-1]):
-        while ir<n+1 and masses[ir]<=m:
-            ir+=1
-        while il<ir-1 and masses[il+1]<m:
-            il+=1
-        assert(masses[il] < m and masses[ir] > m
-              ), f"{m=}, {masses[il]=}, {masses[ir]=}"
-        η = (m - masses[il]) / (masses[ir]-masses[il])
-        φl = ablseq_wends[il]
-        φlω = range_remapping.from_unitinterval(φl)
-        φr = ablseq_wends[ir]
-        φrω = range_remapping.from_unitinterval(φr)
-        def interpolation_point(τgl, τgr, iters=0):
-            τgm = (τgl+τgr)/2
-            φgmω = φlω + (φrω-φlω)*τgm
-            φgm = range_remapping.to_unitinterval(φgmω)
-            mgm = float(pathspace.mask_masses(φgm))
-            if abs(mgm-m) < accuracy or iters>max_interpfind_iters:
-                return φgm, mgm
-            elif m<mgm:
-                return interpolation_point(τgl, τgm, iters+1)
-            else:
-                return interpolation_point(τgm, τgr, iters+1)
-        result[j], mgm = interpolation_point(0,1)
-    return result
+    for k in range(n_batches):
+        for j, m in enumerate(np.linspace(0, 1, n+2)[1:-1]):
+            while ir<n+1 and masses[ir][k]<=m:
+                ir+=1
+            while il<ir-1 and masses[il+1][k]<m:
+                il+=1
+            assert(masses[il][k] < m and masses[ir][k] > m
+                  ), f"{m=}, {masses[il]=}, {masses[ir]=}"
+            η = (m - masses[il][k]) / (masses[ir][k]-masses[il][k])
+            φl = ablseq_wends[il][k]
+            φlω = range_remapping.from_unitinterval(φl)
+            φr = ablseq_wends[ir][k]
+            φrω = range_remapping.from_unitinterval(φr)
+            def interpolation_point(τgl, τgr, iters=0):
+                τgm = (τgl+τgr)/2
+                φgmω = φlω + (φrω-φlω)*τgm
+                φgm = range_remapping.to_unitinterval(φgmω)
+                mgm = pathspace.mask_masses(φgm)
+                if abs(mgm-m) < accuracy or iters>max_interpfind_iters:
+                    return φgm, mgm
+                elif m<mgm:
+                    return interpolation_point(τgl, τgm, iters+1)
+                else:
+                    return interpolation_point(τgm, τgr, iters+1)
+            result[j][k], mgm = interpolation_point(0,1)
+    return result.reshape((n,)+batchdims+mask_shape)
 
 # Given a possibly invalid path of ablation-masks (i.e., one that may not be
 # pointwise monotone, in the allowed range [0,1], or speed-normalised),
