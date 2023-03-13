@@ -137,7 +137,7 @@ def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
             τgm = (τgl+τgr)/2
             φgmω = φlω + (φrω-φlω)*τgm
             φgm = range_remapping.to_unitinterval(φgmω)
-            mgm = float(φgm.mean())
+            mgm = float(pathspace.mask_masses(φgm))
             if abs(mgm-m) < accuracy or iters>max_interpfind_iters:
                 return φgm, mgm
             elif m<mgm:
