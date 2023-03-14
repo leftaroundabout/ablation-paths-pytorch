@@ -128,16 +128,16 @@ def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
     masses = masses.reshape(n+2, n_batches)
     ablseq_wends = ablseq_wends.reshape(n+2, n_batches, *mask_shape)
     result = zeros((n,n_batches)+mask_shape).to(abl_seq.device)
-    il = 0
-    ir = 1
     for k in range(n_batches):
+        il = 0
+        ir = 1
         for j, m in enumerate(np.linspace(0, 1, n+2)[1:-1]):
             while ir<n+1 and masses[ir][k]<=m:
                 ir+=1
             while il<ir-1 and masses[il+1][k]<m:
                 il+=1
             assert(masses[il][k] < m and masses[ir][k] > m
-                  ), f"{m=}, {masses[il]=}, {masses[ir]=}"
+                  ), f"{m=}, {masses[il][k]=}, {masses[ir][k]=}"
             η = (m - masses[il][k]) / (masses[ir][k]-masses[il][k])
             φl = ablseq_wends[il][k]
             φlω = range_remapping.from_unitinterval(φl)
