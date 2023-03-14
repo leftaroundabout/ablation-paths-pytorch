@@ -710,7 +710,9 @@ def path_optimisation_sequence (
             nonlocal pth
             pth = ( pth*(1-filter_mix_ratio)
                    + apply_filter(pth, σ.rescaled(scale_factor))*filter_mix_ratio )
-        if callable(filter_cfg):
+        if isinstance(filter_cfg, NOPFilteringConfig):
+            pass
+        elif callable(filter_cfg):
             filterWith(filter_cfg(i))
         elif filter_cfg is not None:
             filterWith(filter_cfg)
