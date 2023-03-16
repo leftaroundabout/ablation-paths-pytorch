@@ -602,8 +602,8 @@ def interactive_view_mask( abl_seqs, x=None, baseline=None
                                            , abl_seqs[:,varsel]
                                            , torch.ones_like(abl_seqs[0:1, 0]) ] )
                                for varsel in [0, 1] ] )
-        assert(abl_seq_wEndpoints.shape==((n_ablseq+2)*2, *mask_shape)
-              ), f"{abl_seq_wEndpoints.shape=}, {n_ablseq=}, {mask_shape=}, {abl_seqs.shape=}"
+        # assert(abl_seq_wEndpoints.shape==((n_ablseq+2)*2, *mask_shape)
+        #       ), f"{abl_seq_wEndpoints.shape=}, {n_ablseq=}, {mask_shape=}, {abl_seqs.shape=}"
     else:
         abl_seq_wEndpoints = torch.cat(
                               [ ooc(torch.cat( [ torch.zeros_like(abl_seqs[0:1])

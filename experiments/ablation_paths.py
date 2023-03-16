@@ -123,7 +123,8 @@ def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
     assert(ablseq_wends.shape[1 : 1+len(batchdims)]==batchdims
           ), f"{ablseq_wends.shape=}, {batchdims=}"
     mask_shape = ablseq_wends.shape[1+len(batchdims):]
-    assert(mask_shape==pathspace.ablmask_shape)
+    # assert(mask_shape==pathspace.ablmask_shape
+    #       ), f"{mask_shape=}, {pathspace.ablmask_shape=}"
     n_batches = np.product(batchdims) if len(batchdims)>0 else 1
     masses = masses.reshape(n+2, n_batches)
     ablseq_wends = ablseq_wends.reshape(n+2, n_batches, *mask_shape)

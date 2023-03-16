@@ -17,6 +17,8 @@
 #
 ##############################################################################
 
+from __future__ import annotations
+
 import numpy as np
 import numbers
 import torch
@@ -32,6 +34,9 @@ import odl
 
 from abc import ABC, abstractmethod
 from enum import Enum
+
+from typing import Optional
+
 
 def img_fft(image):
     return torch.fft.fft(torch.fft.fft(image, dim=1), dim=2)
@@ -110,8 +115,14 @@ def apply_sobolevdualproj_filter(image, scale):
 
 class AbstractFilteringConfig(ABC):
     @abstractmethod
-    def rescaled(scl_factor):
+    def rescaled(scl_factor) -> AbstractFilteringConfig:
         raise NotImplementedError
+    @property
+    def filter_dimensionality(self) -> Optional[int]:
+        """Filters act on tensors, specifically on the last n dimensions.
+        This property describes how many those are. If `None`, this means
+        it depends on the input (in a way that is not generally specified)."""
+        return None
 
 class NOPFilteringConfig(AbstractFilteringConfig):
     def __init__(self):
@@ -120,12 +131,16 @@ class NOPFilteringConfig(AbstractFilteringConfig):
         return self
 
 class CustomFilteringConfig(AbstractFilteringConfig):
-    def __init__(self, custom_filter_fn, scl_factor=1.0):
+    def __init__(self, custom_filter_fn, scl_factor=1.0, dimensionality=None):
         self.custom_filter_fn = custom_filter_fn
         self.scl_factor = scl_factor
+        self.dimensionality = dimensionality
     def rescaled(self, scl_factor):
         return CustomFilteringConfig( self.custom_filter_fn
                                     , scl_factor=self.scl_factor*scl_factor )
+    @property
+    def filter_dimensionality(self) -> Optional[int]:
+        return self.dimensionality
 
 class LowpassFilterType(Enum):
     Gaussian=1
@@ -133,13 +148,17 @@ class LowpassFilterType(Enum):
     Brickwall=3
 
 class LowpassFilteringConfig(AbstractFilteringConfig):
-    def __init__(self, filter_type, sigma):
+    def __init__(self, filter_type, sigma, dimensionality=2):
         self.filter_type = filter_type
         self.sigma = ( sigma.sigma if isinstance(sigma, FilteringConfig)
                          else sigma )
+        self.dimensionality = dimensionality
     def rescaled(self, scl_factor):
         assert(isinstance(scl_factor, numbers.Number))
         return FilteringConfig(self.filter_type, self.sigma * scl_factor)
+    @property
+    def filter_dimensionality(self) -> Optional[int]:
+        return self.dimensionality
 
 class SymmetrizingFilterType(Enum):
     TimeRev_Is_OppositeMask=1
@@ -181,19 +200,32 @@ class ComplementaryFilteringConfig(AbstractFilteringConfig):
                  opposite_filter = self.opposite_filter.rescaled(scl_factor))
 
 def apply_filter(image, ftr_conf=6):
+    def on_smashed_bash_dims(f):
+        d = ftr_conf.filter_dimensionality
+        def smashed_f(x):
+            if d is not None:
+                batch_dims = x.shape[ : -d]
+                filter_dims = x.shape[-d : ]
+                return f(x.reshape(np.product(batch_dims), *filter_dims)
+                        ).reshape(*batch_dims, *filter_dims)
+            else:
+                return f(x)
+        return smashed_f
+
     if isinstance(ftr_conf, NOPFilteringConfig):
         return image
     elif isinstance(ftr_conf, CustomFilteringConfig):
         return ftr_conf.custom_filter_fn(image, scl_factor=ftr_conf.scl_factor)
     elif isinstance(ftr_conf, LowpassFilteringConfig):
-        return {
-       LowpassFilterType.Gaussian: lambda img:
-          apply_gaussian_filter(img, ftr_conf.sigma)
-     , LowpassFilterType.Brickwall: lambda img:
-          apply_brickwall_filter(img, ftr_conf.sigma)
-     , LowpassFilterType.BorderStretched_Gaussian: lambda img:
-          apply_borderstretched_gaussian_filter(img, ftr_conf.sigma)
-     }[ftr_conf.filter_type](image)
+        return on_smashed_bash_dims({
+            LowpassFilterType.Gaussian: lambda img:
+               apply_gaussian_filter( img, ftr_conf.sigma )
+          , LowpassFilterType.Brickwall: lambda img:
+               apply_brickwall_filter(img, ftr_conf.sigma)
+          , LowpassFilterType.BorderStretched_Gaussian: lambda img:
+               apply_borderstretched_gaussian_filter( img, ftr_conf.sigma
+                               , dimensionality=ftr_conf.filter_dimensionality )
+          }[ftr_conf.filter_type])(image)
     elif isinstance(ftr_conf, SymmetrizeFilteringConfig):
         return {
        SymmetrizingFilterType.TimeRev_Is_OppositeMask: lambda imgs:
