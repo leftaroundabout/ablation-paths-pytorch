@@ -353,6 +353,8 @@ class AblPathObjective(Enum):
     FwdLongestRetaining=0
     BwdQuickestDissipating=1
     FwdRetaining_BwdDissipating=2
+    BoundaryStraddle_Contrast=3
+    FwdQuickestDissipating=4
 
 class LinInterpPathsSpace(PathsSpace):
     def __init__(self, x, baseline):
@@ -524,7 +526,8 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                               , grad_estim_strategy = GradEstimation_Strategy.autodiff_grad
                               ):
     nSq = abl_seq.shape[0]
-    mask_shape = abl_seq.shape[1:]
+    do_boundarystraddle = objective is AblPathObjective.BoundaryStraddle_Contrast
+    mask_shape = abl_seq.shape[2:] if do_boundarystraddle else abl_seq.shape[1:]
     x = pathspace.target_image
     baseline = pathspace.baseline_image
     nCh = x.shape[0]
@@ -535,9 +538,10 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
 
     # Suitably reshaped and resampled version of mask, for applying (with
     # auto-broadcast channel dimension) to target- and baseline images.
-    resampled_abl_seq = resample_to_reso( abl_seq.reshape(nSq, 1, *mask_shape)
-                                        , pathspace.ablmask_shape
-                                        )
+    resampled_abl_seq = resample_to_reso(
+             abl_seq.reshape(nSq, 2 if do_boundarystraddle else 1, *mask_shape)
+           , pathspace.ablmask_shape
+           )
 
     # If given a suitable remapping function, use it for a representation
     # of the ablation path that is not limited to the range [0,1].
@@ -557,15 +561,20 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
         argument = pathspace.apply_mask_seq(
                                { AblPathObjective.FwdLongestRetaining:
                                     lambda rabs: rabs
+                               , AblPathObjective.FwdQuickestDissipating:
+                                    lambda rabs: rabs
                                , AblPathObjective.BwdQuickestDissipating:
                                     lambda rabs: 1-rabs
                                , AblPathObjective.FwdRetaining_BwdDissipating:
                                     lambda rabs: torch.cat([rabs, 1-rabs], dim=0)
+                               , AblPathObjective.BoundaryStraddle_Contrast:
+                                    lambda rabs: torch.cat([rabs[:,0], rabs[:,1]], dim=0).unsqueeze(1)
                                }[objective]
                                 (quantized_relimited)
                        )
  
-        n_positive_weighted = ( 0 if objective is AblPathObjective.BwdQuickestDissipating
+        n_positive_weighted = ( 0 if objective in [ AblPathObjective.BwdQuickestDissipating
+                                                  , AblPathObjective.FwdQuickestDissipating ]
                                else nSq )
         n_negative_weighted = ( 0 if objective is AblPathObjective.FwdLongestRetaining
                                else nSq )
@@ -575,24 +584,29 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
         assert(n_evals == n_positive_weighted+n_negative_weighted
               ), f"{n_positive_weighted=}, {n_negative_weighted=}, {n_evals=}"
  
+        eval_signs = torch.tensor( [ 1 for _ in range(n_positive_weighted)]
+                                 + [-1 for _ in range(n_negative_weighted)]
+                                 ).to(abl_seq.device)
+
         # Ablation path score, computed as the "integral": average of the
         # target-class probability over the path. Backward-dissipating contributions
         # are weighed negatively.
         intg_score = torch.mean(
                         torch.softmax(model_result.reshape(n_evals,n_classes), -1)
                                            [:, label_nr]
-                       * torch.tensor([1 for _ in range(n_positive_weighted)]
-                                      + [-1 for _ in range(n_negative_weighted)] )
-                              .to(abl_seq.device)
+                            * eval_signs
                       ) * (2 if objective is AblPathObjective.FwdRetaining_BwdDissipating
-                            else 1)
+                                 or do_boundarystraddle
+                            else 1
+                      ) + (1 if objective is AblPathObjective.FwdQuickestDissipating
+                            else 0)
  
         if grad_estim_strategy is GradEstimation_Strategy.autodiff_grad:
             # Gradient of the integral-score, as a function of the entire mask-path;
             # in shape of its oversampled form.
             grad = pathspace.differential_to_gradient(
                                 torch.autograd.grad( intg_score
-                              , quantized_abl_seq )[0][:,0] )
+                              , quantized_abl_seq )[0] )
            
             grad = gradients_postproc(grad)
             
@@ -612,7 +626,7 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
                 print(q0)
                 print(q1)
                 raise ZeroDivisionError(f"{distance=}")
-            grad = (q1 - q0)[:,0] * (intg_score1 - intg_score0) / distance
+            grad = (q1 - q0) * (intg_score1 - intg_score0) / distance
         intg_score = (intg_score0 + intg_score1) / 2
     else:
         raise ValueError(f"Unknown gradient-estimation strategy {grad_estim_strategy}")
@@ -623,14 +637,17 @@ def gradientMove_ablation_path( model, pathspace, abl_seq
         update = grad * optstep
     elif isinstance(optstep, OptstepStrategy):
         update = grad * optstep.factor_for_update(grad)
-    assert(update.shape==(nSq, *pathspace.ablmask_shape)
-          ), f"{update.shape} != {(nSq, *pathspace.ablmask_shape)}"
+    assert(update.shape==(nSq, 2 if do_boundarystraddle else 1, *pathspace.ablmask_shape)
+          ), f"{update.shape=}, {nSq=}, {pathspace.ablmask_shape=}"
     
     resampled_abl_seq = range_remapping.to_unitinterval(
-                delimited_abl_seq[:,0] + update
+                delimited_abl_seq + update
                            ).detach()
 
-    abl_seq[:] = resample_to_reso(resampled_abl_seq, mask_shape)
+    if do_boundarystraddle:
+        abl_seq[:] = resample_to_reso(resampled_abl_seq, mask_shape)
+    else:
+        abl_seq[:] = resample_to_reso(resampled_abl_seq, mask_shape)[:,0]
 
     return float(intg_score)
 
@@ -666,11 +683,30 @@ class BorderVanish_SaturationBoost(SaturationAdjustment):
         saturation_window = bordervanish_window(masks)
         return saturated_masks(masks, self.saturation*saturation_window)
 
+
+def boundarystraddle_shrinkwrap(path, wrap_strength=0.1):
+    """A “filter” to be used on the pairs of paths involved in
+    `AblPathObjective.BoundaryStraddle_Contrast`. It does not affect
+    the masks directly but instead pulls both of the paths closer
+    together, and specifically in a way that causes the highlighted
+    path to contain masks that are preferrably only locally more active
+    than the contrasting path."""
+    path_steps = path.shape[0]
+    assert(path.shape[1]==2
+          ), f"{path.shape=}"
+    def ctr_attract(x):
+        return x*(1-wrap_strength) + x**2*wrap_strength
+    return torch.stack( [ path[:,0]
+                        , path[:,0] + ctr_attract(path[:,1] - path[:,0]) ]
+                      , dim=1 )
+
 def path_optimisation_sequence (
           model, pathspaces, path_steps, optstep
         , saturation=0, filter_cfg=None, filter_mix_ratio=1
         , initpth=None, ablmask_resolution=None
         , pathrepairer=repair_ablation_path
+        , objective=AblPathObjective.FwdLongestRetaining
+        , boundaryshrink_wrap_strength=None
         , momentum_inertia=0
         , range_remapping: RangeRemapping =IdentityRemapping()
         , **kwargs ):
@@ -679,7 +715,19 @@ def path_optimisation_sequence (
     img_shape = x_example.shape[1:]
     if ablmask_resolution is None:
         ablmask_resolution = example_pathspace.ablmask_shape
-    pth = ( torch.stack([p*torch.ones(ablmask_resolution)
+
+    if objective is AblPathObjective.BoundaryStraddle_Contrast:
+        if boundaryshrink_wrap_strength is None:
+            boundaryshrink_wrap_strength = 0.1
+    else:
+        assert(boundaryshrink_wrap_strength is None)
+
+    ablmask_slice_shape = (
+            (2,)+ablmask_resolution
+                if objective is AblPathObjective.BoundaryStraddle_Contrast
+                else ablmask_resolution )
+
+    pth = ( torch.stack([p*torch.ones(ablmask_slice_shape)
                          for p in np.linspace(0,1,path_steps)[1:-1]])
                    .to(x_example.device)
              if initpth is None else initpth )
@@ -692,6 +740,7 @@ def path_optimisation_sequence (
         pathspace = pathspaces()
         current_score = gradientMove_ablation_path(
               model, pathspace, abl_seq=pth, optstep=optstep
+            , objective=objective
             , range_remapping=range_remapping, **kwargs )
         if momentum_inertia>0:
             momentum = ( momentum * momentum_inertia
@@ -716,6 +765,10 @@ def path_optimisation_sequence (
             filterWith(filter_cfg(i))
         elif filter_cfg is not None:
             filterWith(filter_cfg)
+
+        if objective is AblPathObjective.BoundaryStraddle_Contrast:
+            pth = boundarystraddle_shrinkwrap(pth, wrap_strength=boundaryshrink_wrap_strength)
+
         pth = pathrepairer(pth, pathspace=pathspace, range_remapping=range_remapping)
         if momentum_inertia>0:
             momentum = pth - old_pth
@@ -820,7 +873,7 @@ def optimised_path( model, x=None, baselines=None
                         path=pth, score=current_score, saturation=sat))
                      , end=("\r" if progress_on_stdout.overwrite_same_line else "\n") )
             else:
-                print(f"saturation: {sat:.2f}, score: {current_score:.3f}", end="\r")
+                print(f"saturation: {sat:.2f}, score: {current_score:.3g}        ", end="\r")
         i+=1
 
 def masked_interpolation(x=None, baseline=None, abl_seq=None, pathspace=None, include_endpoints=False):

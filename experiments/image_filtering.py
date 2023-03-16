@@ -119,6 +119,14 @@ class NOPFilteringConfig(AbstractFilteringConfig):
     def rescaled(self, scl_factor):
         return self
 
+class CustomFilteringConfig(AbstractFilteringConfig):
+    def __init__(self, custom_filter_fn, scl_factor=1.0):
+        self.custom_filter_fn = custom_filter_fn
+        self.scl_factor = scl_factor
+    def rescaled(self, scl_factor):
+        return CustomFilteringConfig( self.custom_filter_fn
+                                    , scl_factor=self.scl_factor*scl_factor )
+
 class LowpassFilterType(Enum):
     Gaussian=1
     BorderStretched_Gaussian=2
@@ -175,6 +183,8 @@ class ComplementaryFilteringConfig(AbstractFilteringConfig):
 def apply_filter(image, ftr_conf=6):
     if isinstance(ftr_conf, NOPFilteringConfig):
         return image
+    elif isinstance(ftr_conf, CustomFilteringConfig):
+        return ftr_conf.custom_filter_fn(image, scl_factor=ftr_conf.scl_factor)
     elif isinstance(ftr_conf, LowpassFilteringConfig):
         return {
        LowpassFilterType.Gaussian: lambda img:

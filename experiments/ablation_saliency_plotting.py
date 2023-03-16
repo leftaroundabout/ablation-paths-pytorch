@@ -545,7 +545,7 @@ intuitive_saliency_mask_combo_img_views = [
   , MaskOverlayed( 'interpolation_result', MaskMidlevelContour() )
   ]
 
-def interactive_view_mask( abl_seq, x=None, baseline=None
+def interactive_view_mask( abl_seqs, x=None, baseline=None
                          , pathspace=None
                          , model=None, labels=None
                          , x_to_image=lambda ξ: ξ
@@ -568,8 +568,11 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
         x = pathspace.target_image
         baseline = pathspace.baseline_image
         
-
-    n_ablseq = abl_seq.shape[0]
+    n_ablseq = abl_seqs.shape[0]
+    mask_shape = pathspace.ablmask_shape
+    pathvars_shape = abl_seqs.shape[1 : -len(mask_shape)]
+    use_bespoke_complement = pathvars_shape==(2,)
+    assert( use_bespoke_complement or pathvars_shape==() )
     def to_unit_range(y):
         return (2*y - image_valrange[0] - image_valrange[1]
                ) / (image_valrange[1] - image_valrange[0])
@@ -578,7 +581,7 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
         if type(model) is TrainedTimmModel:
             classification_name = model.timm_model_name
     inter_select = pn.widgets.IntSlider(start=0, end=n_ablseq+1)
-    complement_select = pn.widgets.Checkbox(name='Complement masks')
+    complement_select = pn.widgets.Checkbox(name='Contrast-masks')
     if view_interpolation is auto:
         view_interpolation = (x is not None) and (baseline is not None)
     if view_classification is auto:
@@ -593,11 +596,20 @@ def interactive_view_mask( abl_seq, x=None, baseline=None
     hvopts_classif = hvopts_general.copy()
     if classification_name is not None:
         hvopts_classif['name'] = classification_name
-    abl_seq_wEndpoints = torch.cat(
-                          [ ooc(torch.cat( [ torch.zeros_like(abl_seq[0:1])
-                                           , abl_seq
-                                           , torch.ones_like(abl_seq[0:1]) ] ))
-                           for ooc in [lambda abls: abls, lambda abls: 1-abls] ] )
+    if use_bespoke_complement:
+        abl_seq_wEndpoints = torch.cat(
+                              [ torch.cat( [ torch.zeros_like(abl_seqs[0:1, 0])
+                                           , abl_seqs[:,varsel]
+                                           , torch.ones_like(abl_seqs[0:1, 0]) ] )
+                               for varsel in [0, 1] ] )
+        assert(abl_seq_wEndpoints.shape==((n_ablseq+2)*2, *mask_shape)
+              ), f"{abl_seq_wEndpoints.shape=}, {n_ablseq=}, {mask_shape=}, {abl_seqs.shape=}"
+    else:
+        abl_seq_wEndpoints = torch.cat(
+                              [ ooc(torch.cat( [ torch.zeros_like(abl_seqs[0:1])
+                                               , abl_seqs
+                                               , torch.ones_like(abl_seqs[0:1]) ] ))
+                               for ooc in [lambda abls: abls, lambda abls: 1-abls] ] )
     n_tested = abl_seq_wEndpoints.shape[0]
 
     interpol_seq = masked_interpolation(pathspace=pathspace, abl_seq=abl_seq_wEndpoints
