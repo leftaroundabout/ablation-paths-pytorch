@@ -411,7 +411,7 @@ class BlurPyramidPathsSpace(PathsSpace):
 
     @property
     def ablmask_shape(self):
-        return self.x.shape
+        return self.x.shape[1:]
 
     def apply_mask_seq(self, abl_seq: torch.Tensor):
         # Adapted from TorchRay,
