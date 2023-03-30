@@ -739,10 +739,13 @@ def path_optimisation_sequence (
         if momentum_inertia>0:
             old_pth = pth.clone().detach()
         pathspace = pathspaces()
+
         current_score = gradientMove_ablation_path(
               model, pathspace, abl_seq=pth, optstep=optstep
             , objective=objective
             , range_remapping=range_remapping, **kwargs )
+        yield pth, current_score
+
         if momentum_inertia>0:
             momentum = ( momentum * momentum_inertia
                         + (pth - old_pth)*(1-momentum_inertia) )
@@ -773,7 +776,6 @@ def path_optimisation_sequence (
         pth = pathrepairer(pth, pathspace=pathspace, range_remapping=range_remapping)
         if momentum_inertia>0:
             momentum = pth - old_pth
-        yield pth, current_score
 
 class PathOptFinishCriterion(ABC):
     def __init__(self, subcriteria_dnf):
@@ -863,15 +865,16 @@ def optimised_path( model, x=None, baselines=None
 
     for pth, current_score in path_optimisation_sequence (
           model, pathspaces, path_steps, optstep, **kwargs ):
+        sat = float(path_saturation(pth))
+        state_summary = AblPathStateSummary(
+                         path=pth, score=current_score, saturation=sat)
         if finish_criterion(i, pth, current_score):
-            return pth
+            return state_summary
         if logging_destination is not None:
             print(current_score, file=logging_destination, flush=True)
         if progress_on_stdout:
-            sat = float(path_saturation(pth))
             if isinstance(progress_on_stdout, AblPathOptimProgressShower):
-                print( progress_on_stdout(AblPathStateSummary(
-                        path=pth, score=current_score, saturation=sat))
+                print( progress_on_stdout(state_summary)
                      , end=("\r" if progress_on_stdout.overwrite_same_line else "\n") )
             else:
                 print(f"saturation: {sat:.2f}, score: {current_score:.3g}        ", end="\r")
