@@ -736,15 +736,15 @@ def path_optimisation_sequence (
         momentum = torch.zeros_like(pth)
 
     for i in count():
-        if momentum_inertia>0:
-            old_pth = pth.clone().detach()
+        old_pth = pth.clone().detach()
+
         pathspace = pathspaces()
 
         current_score = gradientMove_ablation_path(
               model, pathspace, abl_seq=pth, optstep=optstep
             , objective=objective
             , range_remapping=range_remapping, **kwargs )
-        yield pth, current_score
+        yield old_pth, current_score
 
         if momentum_inertia>0:
             momentum = ( momentum * momentum_inertia
