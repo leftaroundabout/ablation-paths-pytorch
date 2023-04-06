@@ -150,12 +150,12 @@ def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
                 φgm = range_remapping.to_unitinterval(φgmω)
                 mgm = pathspace.mask_masses(φgm)
                 if abs(mgm-m) < accuracy or iters>max_interpfind_iters:
-                    return φgm, mgm
+                    return φgm
                 elif m<mgm:
                     return interpolation_point(τgl, τgm, iters+1)
                 else:
                     return interpolation_point(τgm, τgr, iters+1)
-            result[j][k], mgm = interpolation_point(0,1)
+            result[j][k] = interpolation_point(0,1)
     return result.reshape((n,)+batchdims+mask_shape)
 
 # Given a possibly invalid path of ablation-masks (i.e., one that may not be
