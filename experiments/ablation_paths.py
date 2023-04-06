@@ -146,7 +146,7 @@ def reParamNormalise_ablation_speed( abl_seq, pathspace: PathsSpace
             φrω = range_remapping.from_unitinterval(φr)
             def interpolation_point(τgl, τgr, iters=0):
                 τgm = (τgl+τgr)/2
-                φgmω = φlω + (φrω-φlω)*τgm
+                φgmω = φlω*(1-τgm) + φrω*τgm
                 φgm = range_remapping.to_unitinterval(φgmω)
                 mgm = pathspace.mask_masses(φgm)
                 if abs(mgm-m) < accuracy or iters>max_interpfind_iters:
@@ -774,8 +774,11 @@ def path_optimisation_sequence (
             pth = boundarystraddle_shrinkwrap(pth, wrap_strength=boundaryshrink_wrap_strength)
 
         pth = pathrepairer(pth, pathspace=pathspace, range_remapping=range_remapping)
+        
         if momentum_inertia>0:
             momentum = pth - old_pth
+
+        assert(not(torch.any(torch.isnan(pth))))
 
 class PathOptFinishCriterion(ABC):
     def __init__(self, subcriteria_dnf):
