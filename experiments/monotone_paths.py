@@ -25,8 +25,6 @@
 import numba as nb
 import numpy as np
 
-import odl
-
 @nb.experimental.jitclass([
     ('xMin', nb.int64)
   , ('xMax', nb.int64)
@@ -161,72 +159,4 @@ def project_monotone_lInftymin(pth):
         ym = (iv.yMin + iv.yMax)/2
         pth[iv.xMin : iv.xMax+1] = np.array([ym] * (iv.xMax+1 - iv.xMin))
 
-
-class IntegrationOperator(odl.Operator):
-    def __init__(self, input_space, cumu_intg_directions=(), integration_directions=()):
-        dom = input_space
-        self.all_directions = list(dom.partition.byaxis)
-        kept_directions = [i for i in range(len(dom.partition.shape))
-                            if i not in integration_directions]
-        ran_ = odl.discr.uniform_discr_frompartition(
-                   dom.partition.byaxis[kept_directions])
-        kept_labels = [label for (index, label) in enumerate(input_space.axis_labels) if index not in integration_directions]
-        ran = odl.discr.discr_space.DiscretizedSpace(ran_.partition, ran_.tspace, axis_labels=kept_labels)
-        self.integration_directions = integration_directions
-        self.intg_cell_vol = dom.partition.byaxis[
-               cumu_intg_directions + integration_directions].cell_volume
-        self.cumu_intg_directions = cumu_intg_directions
-        super(IntegrationOperator, self).__init__(dom, ran, linear=True)
-    def _call(self, x):
-        if self.cumu_intg_directions:
-            xData = x.asarray() # np.roll(x.asarray(), 1, axis=self.cumu_intg_directions)
-            for idir in self.cumu_intg_directions:
-#                def ixtuple(pid):
-#                    return (
-#                      tuple(np.s_[:] for _ in range(idir-1))
-#                       + (0,)
-#                       + tuple(np.s_[:] for _ in range(len(self.all_directions) - idir - 1))
-#                     )
-#                xData[ixtuple(0)] = xData[ixtuple(1)]/2 # trapezoidal and corresponding to
-#                                                        # order-0 extension of PartialDerivative.
-                xData = np.cumsum(xData, axis=idir)
-            return np.sum(xData, axis=self.integration_directions
-                        ) * self.intg_cell_vol
-        return np.sum(x.asarray(), axis=self.integration_directions
-                  ) * self.intg_cell_vol
-    @property
-    def adjoint(self):
-        return AdjointIntegrationOperator(self)
-
-
-class AdjointIntegrationOperator(odl.Operator):
-    def __init__(self, intg_op):
-        self.intg_op = intg_op
-        self.tile_preshape = [0 for li in intg_op.domain.partition.shape]
-        self.tilingcopies = [0 for li in intg_op.domain.partition.shape]
-        for i, li in enumerate(intg_op.domain.partition.shape):
-            if i in intg_op.integration_directions:
-                self.tile_preshape[i] = 1
-                self.tilingcopies[i] = li
-            else:
-                self.tile_preshape[i] = li
-                self.tilingcopies[i] = 1
-        ran = intg_op.domain
-        self.const_elem_factor = (
-            self.intg_op.intg_cell_vol
-            *np.product(ran.partition.byaxis[intg_op.integration_directions].shape) )
-        super(AdjointIntegrationOperator, self
-         ).__init__(domain=intg_op.range, range=ran, linear=True)
-    def _call(self, y):
-        ya = y.asarray()
-        integrated = np.tile(ya.reshape(self.tile_preshape), self.tilingcopies)
-        if self.intg_op.cumu_intg_directions:
-            xData = np.flip(integrated, axis=self.intg_op.cumu_intg_directions)
-            for idir in self.intg_op.cumu_intg_directions:
-                xData = np.cumsum(xData, axis=idir)
-            integrated = np.flip( xData, axis=self.intg_op.cumu_intg_directions )
-        return integrated * self.const_elem_factor
-    @property
-    def adjoint(self):
-        return self.intg_op
 

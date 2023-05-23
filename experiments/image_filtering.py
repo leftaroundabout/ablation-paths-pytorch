@@ -30,8 +30,6 @@ import scipy.ndimage
 
 import torch.fft
 
-import odl
-
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -63,11 +61,6 @@ def apply_gaussian_filter(image, sigma):
                         for monochromatic in image.cpu()]
     return torch.Tensor(filtered).to(image.device)
 
-def get_sobolev_metric(space, scale=1.):
-    lap = odl.discr.diff_ops.Laplacian(space, pad_mode='order0')
-    op = odl.operator.IdentityOperator(space) - scale**2 * lap
-    return op
-
 def border_stretch_trafo(image, axis=None, interp_kind='cubic', undo=False):
     if isinstance(image, torch.Tensor):
         return torch.tensor( border_stretch_trafo (image.cpu().numpy()
@@ -89,29 +82,6 @@ def apply_borderstretched_gaussian_filter(image, sigma):
     return border_stretch_trafo(apply_gaussian_filter( border_stretch_trafo(image)
                                                      , sigma=sigma
                                                      ), undo=True )
-
-def apply_sobolevdualproj_filter(image, scale):
-    if type(image) is odl.DiscretizedSpaceElement:
-        space = image.space
-        φreg = space.one()
-        odl.solvers.iterative.conjugate_gradient(
-              get_sobolev_metric(space, scale), φreg, image, niter=40)
-        return φreg.copy()
-    elif type(image) is np.ndarray:
-        d = len(image.shape)
-        space = odl.discr.uniform_discr(
-            min_pt=list(0 for _ in range(d))
-          , max_pt=list(1 for _ in range(d))
-          , shape=image.shape
-          , dtype='float32' )
-        image_odl = space.element(image)
-        return apply_sobolevdualproj_filter(image_odl, scale).asarray()
-    elif type(image) is torch.Tensor:
-        return torch.Tensor(
-                  apply_sobolevdualproj_filter(image.cpu().numpy(), scale)
-                ).to(image.device)
-    else:
-        raise TypeError("Supports only odl.DiscretisedSpaceElement, numpy.ndarray and torch.Tensor")
 
 class AbstractFilteringConfig(ABC):
     @abstractmethod

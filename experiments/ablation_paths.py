@@ -19,7 +19,6 @@
 
 import numpy as np
 import torch
-import odl
 from monotone_paths import project_monotone_lInftymin, IntegrationOperator
 from ablation import compute_square_intensity
 from image_filtering import apply_filter, FilteringConfig, LowpassFilterType, NOPFilteringConfig
@@ -52,14 +51,6 @@ def monotonise_ablationpath(abl_seq):
             thispixel = abl_seq[slicesel]
             project_monotone_lInftymin(thispixel)
             abl_seq[slicesel] = thispixel
-    elif type(abl_seq) is odl.DiscretizedSpaceElement:
-        ablseq_arr = abl_seq.asarray()
-        for ij in all_indices(ablseq_arr[0]):
-            pixslice = (np.s_[:],) + ij
-            thispixel = ablseq_arr[pixslice]
-            project_monotone_lInftymin(thispixel)
-            ablseq_arr[pixslice] = thispixel
-        abl_seq = abl_seq.space.element(ablseq_arr)
     else:
         raise ValueError("This function currently works only with Torch tensors, Numpy arrays or ODL DiscretizedSpace elements.")
 
@@ -169,80 +160,7 @@ def repair_ablation_path(abl_seq, pathspace: PathsSpace, range_remapping: RangeR
         return reParamNormalise_ablation_speed(abl_seq, pathspace, range_remapping)
     elif type(abl_seq) is np.ndarray:
         return reParamNormalise_ablation_speed(np.clip(abl_seq, 0, 1), pathspace, range_remapping)
-    elif type(abl_seq) is odl.DiscretizedSpaceElement:
-        abl_arr = abl_seq.asarray()
-        return abl_seq.space.element(
-            reParamNormalise_ablation_speed(np.clip(abl_arr, 0, 1)))
 
-
-def time_pderiv(dom):
-    return odl.PartialDerivative(dom, axis=0, pad_mode='order1')
-def time_cumu_integral(dom):
-    intg_cell_vol = dom.partition.byaxis[0].cell_volume
-    def integrate(ψ):
-        ψData = np.roll(ψ.asarray(), 1, axis=0)
-        ψData[0] = ψData[1]/2   # trapezoidal and corresponding to
-                                # order-0 extension of PartialDerivative.
-        return dom.element(np.cumsum(ψData, axis=0) * intg_cell_vol )
-    return integrate
-
-def unitIntegralConstraint(intg_op):
-    integrationField = intg_op.range
-    return odl.solvers.functional.IndicatorZero(integrationField
-                        ).translated(integrationField.element(lambda x: x[0]*0 + 1))
-
-def dist2(ψ):
-    return odl.solvers.functional.L2Norm(ψ.space).translated(ψ)
-
-def repair_ablation_path_convexOpt( φ, distancespace_embedding=None
-                                  , extra_penalty_ops=[], iterations=20
-                                  ):
-    usesODL = type(φ) is odl.DiscretizedSpaceElement
-    usesTorch = type(φ) is torch.Tensor
-    torchdevice = φ.device if usesTorch else None
-    space = φ.space if usesODL else (
-        odl.uniform_discr(min_pt=[0 for _ in φ.shape], max_pt=[1 for _ in φ.shape]
-                   , shape=φ.shape, dtype='float32') )
-    if usesTorch:
-        φ = φ.cpu().numpy()
-    if not usesODL:
-        φ = space.element(φ)
-    if distancespace_embedding is None:
-        distancespace_embedding = odl.IdentityOperator(space)
-    elif distancespace_embedding=='φspace-L²':
-        distancespace_embedding = IntegrationOperator(space, cumu_intg_directions=(0,))
-    nonnegativity = odl.solvers.functional.IndicatorNonnegativity(space)
-    integration_time = IntegrationOperator(space, integration_directions=(0,))
-    unitIntegral_time = unitIntegralConstraint(integration_time)
-    integration_space = IntegrationOperator(
-          space, integration_directions=tuple(range(1, len(space.shape))) )
-    unitIntegral_space = unitIntegralConstraint(integration_space)
-    ψOrig = time_pderiv(space)(φ)
-    ψTgt = distancespace_embedding(ψOrig)
-    ψ = ψOrig.copy()
-    odl.solvers.nonsmooth.pdhg(
-        ψ
-      , nonnegativity
-      , odl.solvers.functional.SeparableSum(
-                               dist2(ψTgt)
-                             , unitIntegral_space, unitIntegral_time
-                             , *[ op[1] if isinstance(op, tuple)
-                                   else odl.solvers.functional.IdentityFunctional(op.range)
-                                  for op in extra_penalty_ops]
-                             )
-      , odl.BroadcastOperator( distancespace_embedding
-                             , integration_space, integration_time
-                             , *[ op[0] if isinstance(op, tuple)
-                                   else 0
-                                  for op in extra_penalty_ops] )
-      , iterations )
-    result = time_cumu_integral(φ.space)(ψ)
-    if usesTorch:
-        return torch.tensor(result.asarray()).to(torchdevice)
-    elif usesODL:
-        return result
-    else:
-        return result.asarray()
 
 def resample_to_reso(v, tgt_shape):
     if len(v.shape) < len(tgt_shape)+2:
