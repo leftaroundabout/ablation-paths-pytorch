@@ -1,6 +1,6 @@
 ##############################################################################
 #
-# Copyright 2020 Justus Sagemüller
+# Copyright 2020-2023 Justus Sagemüller
 # 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
