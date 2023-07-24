@@ -285,7 +285,7 @@ class LinInterpPathsSpace(PathsSpace):
     def ablmask_shape(self):
         return self.x.shape[1:]
     def apply_mask_seq(self, abl_seq: torch.Tensor):
-        if abl_seq.shape<=self.x.shape:
+        if len(abl_seq.shape)<=len(self.x.shape):
             abl_seq = abl_seq.unsqueeze(1)
         assert(abl_seq.shape[1]==1 and self.x.shape[1:] == abl_seq.shape[2:]
               ), f"{abl_seq.shape=}, {self.x.shape=}"
