@@ -555,6 +555,7 @@ def interactive_view_mask( abl_seqs, x=None, baseline=None
                          , view_scoregraph=False
                          , add_overlay_mask_contours=False
                          , add_overlay_mask_as_hue=False
+                         , control_panel_defaults={}
                          , image_valrange=(-1,1)
                          , focused_labels=[]
                          , objective_class=None
@@ -580,8 +581,11 @@ def interactive_view_mask( abl_seqs, x=None, baseline=None
     if classification_name is None:
         if type(model) is TrainedTimmModel:
             classification_name = model.timm_model_name
-    inter_select = pn.widgets.IntSlider(start=0, end=n_ablseq+1)
-    complement_select = pn.widgets.Checkbox(name='Contrast-masks')
+
+    inter_select = pn.widgets.IntSlider(start=0, end=n_ablseq+1
+                       , value = control_panel_defaults.get('ablation_slice_id', 0))
+    complement_select = pn.widgets.Checkbox(name='Contrast-masks'
+                       , value = control_panel_defaults.get('contrast_masks', False))
     if view_interpolation is auto:
         view_interpolation = (x is not None) and (baseline is not None)
     if view_classification is auto:
@@ -624,7 +628,8 @@ def interactive_view_mask( abl_seqs, x=None, baseline=None
                                           for i in range(abl_seq_wEndpoints.shape[0])])
 
     if add_overlay_mask_as_hue:
-        overlay_enable_select = pn.widgets.Checkbox(name='Mask as hue overlay', value=True)
+        overlay_enable_select = pn.widgets.Checkbox(name='Mask as hue overlay'
+                           , value = control_panel_defaults.get('mask_overlay', True) )
         interpol_seq_maskhint = torch.stack(
                                  [ overlay_mask_as_hue
                                            ( interpol_seq_imgs[i], masks_seq[i] )
